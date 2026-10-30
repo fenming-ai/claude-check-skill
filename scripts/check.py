@@ -534,7 +534,7 @@ def china_signals(tz_name, languages):
 
 
 def level(score):
-    if score >= 99:
+    if score >= 100:
         return "🟢 纯绿"
     if score >= 80:
         return "🟩 偏绿"
@@ -574,7 +574,7 @@ def reach_findings(net):
 
 
 def score_env(facts, signals, net=None):
-    """满分 99。返回 {score, level, items}；无法评分时返回 {score: None, reason}。"""
+    """满分 100。返回 {score, level, items}；无法评分时返回 {score: None, reason}。"""
     if net and net.get("google") is False and net.get("baidu") is True:
         return dict(score=5, level=level(5), items=["直连访问不了 Google、能访问百度：疑似处于中国大陆网络，直接 5 分"])
     usable = [f for f in facts if f.get("countries")]
@@ -623,9 +623,9 @@ def score_env(facts, signals, net=None):
     if not caps and us and s < 86:
         items.append("保底 86（美国出口、未认定为代理）")
         s = 86
-    if s > 99:
-        items.append("封顶 99")
-        s = 99
+    if s > 100:
+        items.append("封顶 100")
+        s = 100
     for cap, text in caps:
         if s > cap:
             s = cap
@@ -640,7 +640,7 @@ def render(rows, disclosed=False, score=None):
     if disclosed:
         text.append(IP_DISCLOSURE)
     if score and score.get("score") is not None:
-        text.append("\n## %s：%d / 99　%s" % (SCORE_NAME, score["score"], score["level"]))
+        text.append("\n## %s：%d / 100　%s" % (SCORE_NAME, score["score"], score["level"]))
         text.extend("- " + item for item in score["items"])
     elif score:
         text.append("\n## %s：未计算（%s）" % (SCORE_NAME, score["reason"]))

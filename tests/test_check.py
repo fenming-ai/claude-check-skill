@@ -255,11 +255,11 @@ class ScoreTests(unittest.TestCase):
         s = check.score_env([self.fact(countries=["CN"], region_bad=True), self.fact(route="终端代理", residential=True, risk=0)], [])
         self.assertEqual(s["score"], 5)
 
-    def test_clean_us_residential_is_pure_green_99(self):
+    def test_clean_us_residential_can_reach_100(self):
         s = check.score_env([self.fact(residential=True, risk=0)], [])
-        self.assertEqual(s["score"], 99)
+        self.assertEqual(s["score"], 100)
         self.assertEqual(s["level"], "🟢 纯绿")
-        self.assertIn("封顶 99", s["items"])
+        self.assertNotIn("封顶 99", s["items"])
 
     def test_us_datacenter_not_proxy_is_above_85(self):
         s = check.score_env([self.fact(hosting=True, tz_match=False)], [])
@@ -290,7 +290,7 @@ class ScoreTests(unittest.TestCase):
 
     def test_proxy_route_is_scored_when_present(self):
         s = check.score_env([self.fact(hosting=True), self.fact(route="终端代理", residential=True, risk=0)], [])
-        self.assertEqual(s["score"], 99)
+        self.assertEqual(s["score"], 100)
 
     def probe(self, google, baidu):
         def opener_open(req, timeout=5):
@@ -332,17 +332,23 @@ class ScoreTests(unittest.TestCase):
     def test_google_reachable_scores_normally(self):
         net, rows = self.probe(google=True, baidu=True)
         self.assertEqual(rows[0]["state"], "记录")
-        self.assertEqual(check.score_env([self.fact(residential=True, risk=0)], [], net)["score"], 99)
+        self.assertEqual(check.score_env([self.fact(residential=True, risk=0)], [], net)["score"], 100)
 
     def test_levels(self):
-        self.assertEqual([check.level(v) for v in (99, 80, 79, 60, 59, 30, 29)],
-                         ["🟢 纯绿", "🟩 偏绿", "🟡 黄", "🟡 黄", "🟠 橙", "🟠 橙", "🔴 红"])
+        self.assertEqual([check.level(v) for v in (100, 99, 80, 79, 60, 59, 30, 29)],
+                         ["🟢 纯绿", "🟩 偏绿", "🟩 偏绿", "🟡 黄", "🟡 黄", "🟠 橙", "🟠 橙", "🔴 红"])
 
     def test_render_shows_score_first(self):
         s = check.score_env([self.fact(residential=True, risk=0)], [])
         text = check.render([check.finding("甲", "记录", "", "")], True, s)
-        self.assertLess(text.index("99 / 99"), text.index("结论"))
+        self.assertLess(text.index("100 / 100"), text.index("结论"))
         self.assertIn("非 Anthropic 官方", text)
+
+    def test_orange_score_keeps_color_in_report(self):
+        score = check.score_env([self.fact()], ["上海时区"])
+        text = check.render([], False, score)
+        self.assertIn("30 / 100", text)
+        self.assertIn("🟠 橙", text)
 
 
 if __name__ == "__main__":
