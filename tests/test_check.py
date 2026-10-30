@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import unittest.mock
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -288,6 +289,48 @@ class ScoreTests(unittest.TestCase):
     def test_proxy_route_is_scored_when_present(self):
         s = check.score_env([self.fact(hosting=True), self.fact(route="终端代理", residential=True, risk=0)], [])
         self.assertEqual(s["score"], 99)
+
+    def probe(self, google, baidu):
+        def opener_open(req, timeout=5):
+            ok = google if "google" in req.full_url else baidu
+            if not ok:
+                raise OSError("unreachable")
+            resp = unittest.mock.MagicMock()
+            resp.__enter__.return_value = resp
+            return resp
+        net = {}
+        with patch.object(check.urllib.request, "build_opener") as factory:
+            factory.return_value.open.side_effect = opener_open
+            rows = check.reach_findings(net)
+            handlers = factory.call_args.args
+        self.assertEqual(handlers[0].proxies, {})  # 直连，不走代理
+        return net, rows
+
+    def test_china_network_without_proxy_is_five(self):
+        net, rows = self.probe(google=False, baidu=True)
+        self.assertEqual(rows[0]["state"], "需处理")
+        self.assertIn("中国大陆网络", rows[0]["evidence"])
+        s = check.score_env([], [], net)  # IP 查询网站全都连不上
+        self.assertEqual(s["score"], 5)
+        self.assertEqual(s["level"], "🔴 红")
+
+    def test_china_network_overrides_reachable_ip_lookup(self):
+        net, _ = self.probe(google=False, baidu=True)
+        s = check.score_env([self.fact(residential=True, risk=0)], [], net)
+        self.assertEqual(s["score"], 5)
+
+    def test_offline_machine_is_not_scored_as_china(self):
+        net, rows = self.probe(google=False, baidu=False)
+        self.assertEqual(rows[0]["state"], "待确认")
+        s = check.score_env([], [], net)
+        self.assertIsNone(s["score"])
+        self.assertIn("网络不通", s["reason"])
+        self.assertIn("未计算（网络不通", check.render([], True, s))
+
+    def test_google_reachable_scores_normally(self):
+        net, rows = self.probe(google=True, baidu=True)
+        self.assertEqual(rows[0]["state"], "记录")
+        self.assertEqual(check.score_env([self.fact(residential=True, risk=0)], [], net)["score"], 99)
 
     def test_levels(self):
         self.assertEqual([check.level(v) for v in (99, 80, 79, 60, 59, 30, 29)],

@@ -27,7 +27,7 @@ BAN_REASONS_URL = "https://support.claude.com/en/articles/8241253"
 UA = "claude-check-skill/1.1"
 IP_ECHO = (("IPv4", "https://api.ipify.org?format=json"), ("IPv6", "https://api6.ipify.org?format=json"))
 PROXY_KEYS = ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
-IP_DISCLOSURE = "本次检查会向 ipify、ipinfo.io、ip-api.com、proxycheck.io 发送请求，查询出口 IP 的地区、类型、风险分和时区；这些服务会看到你的出口 IP。加 --offline 可跳过。"
+IP_DISCLOSURE = "本次检查会向 ipify、ipinfo.io、ip-api.com、proxycheck.io 发送请求，查询出口 IP 的地区、类型、风险分和时区，并直连 Google、百度测试境外网络是否可达；这些服务会看到你的出口 IP。加 --offline 可跳过。"
 
 PROMO = ("怕封号？去 AI优铺买 Claude 新号套餐：https://aiyopu.com/\n"
          "新号套餐和本店账号续月，订阅期内封号可按规则退款，具体怎么退见详情页或问客服。\n"
@@ -545,11 +545,43 @@ def level(score):
     return "🔴 红"
 
 
-def score_env(facts, signals):
-    """满分 99。返回 {score, level, items}；没有可用的出口数据时返回 None。"""
+REACH_TARGETS = (("google", "https://www.google.com/generate_204"), ("baidu", "https://www.baidu.com/"))
+
+
+def reach_findings(net):
+    """直连测 Google 与百度，区分“在中国大陆网络里”和“电脑没联网”。net 会被填成 {google: bool, baidu: bool}。"""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    for key, url in REACH_TARGETS:
+        try:
+            req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": UA})
+            try:
+                response = opener.open(req, timeout=5)
+            except urllib.error.HTTPError as error:
+                response = error  # 有 HTTP 响应就说明网络通
+            with response:
+                net[key] = True
+        except (OSError, ValueError):
+            net[key] = False
+    if net["google"]:
+        return [finding("境外网络连通性", "记录", "直连能访问 Google。", "无需处理。")]
+    if net["baidu"]:
+        return [finding("境外网络连通性", "需处理", "直连访问不了 Google，但能访问百度：疑似处于中国大陆网络。"
+                        "高风险：中国大陆不在 Anthropic 支持地区，帮助中心把“在不受支持的地区创建账号”列为封号原因之一。",
+                        "官方按人实际所在地判断，人在中国大陆不能使用 Claude，换 IP 也不改变这一点。"
+                        "少数公司内网也会屏蔽 Google；如果你人在支持地区，换一个网络再测。封号原因：" + BAN_REASONS_URL)]
+    return [finding("境外网络连通性", "待确认", "直连 Google 和百度都访问不了：电脑可能没联网，或网络被整体拦截。",
+                    "先确认网络能用，再重跑体检；网络不通时无法评分。")]
+
+
+def score_env(facts, signals, net=None):
+    """满分 99。返回 {score, level, items}；无法评分时返回 {score: None, reason}。"""
+    if net and net.get("google") is False and net.get("baidu") is True:
+        return dict(score=5, level=level(5), items=["直连访问不了 Google、能访问百度：疑似处于中国大陆网络，直接 5 分"])
     usable = [f for f in facts if f.get("countries")]
     if not usable:
-        return None
+        if net and net.get("google") is False and net.get("baidu") is False:
+            return dict(score=None, reason="网络不通（Google 和百度都访问不了），先检查网络")
+        return dict(score=None, reason="没有取得出口 IP 地区")
     bad = [f for f in usable if f["region_bad"]]
     if bad:
         where = "、".join("%s %s" % (f["route"], "/".join(f["countries"])) for f in bad)
@@ -607,11 +639,11 @@ def render(rows, disclosed=False, score=None):
     text = ["# Claude 环境体检", "检查结果只说明已观测的环境，不预测封号，也不保证账号稳定。"]
     if disclosed:
         text.append(IP_DISCLOSURE)
-    if score:
+    if score and score.get("score") is not None:
         text.append("\n## %s：%d / 99　%s" % (SCORE_NAME, score["score"], score["level"]))
         text.extend("- " + item for item in score["items"])
-    elif disclosed:
-        text.append("\n## %s：未计算（没有取得出口 IP 地区）" % SCORE_NAME)
+    elif score:
+        text.append("\n## %s：未计算（%s）" % (SCORE_NAME, score["reason"]))
     text.append("\n**" + summary(rows) + "**")
     for row in rows:
         text.append("\n- **%s｜%s**：%s\n  下一步：%s" % (row["state"], row["name"], row["evidence"], row["action"]))
@@ -633,11 +665,13 @@ def main():
         rows.append(classify_error(sys.stdin.read(65536)))
     facts, score = [], None
     if not args.offline:
+        net = {}
+        rows.extend(reach_findings(net))
         rows.extend(ip_findings(os.environ, facts=facts))
         language, region = system_locale()
         signals = china_signals(system_tz_name(), [language, region] + [os.environ.get(k) for k in ("LANG", "LC_ALL")])
-        score = score_env(facts, signals)
-        if signals and score and score["score"] > 5:
+        score = score_env(facts, signals, net)
+        if signals and score and (score.get("score") or 0) > 5:
             rows.append(finding("所在地迹象", "需处理", "；".join(signals) + "，但出口 IP 不在中国。",
                                 "官方按人实际所在地判断：人在中国大陆，换成其他地区的 IP 也不合规。如果你人在支持地区，把电脑时区和语言改回实际所在地即可。"))
     rows += system_findings() + config_findings(Path.home(), args.project, os.environ)
