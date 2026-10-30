@@ -2,7 +2,9 @@
 
 Claude 突然不能用了，先弄清是登录、配置、网络还是账号与组织限制。这个 Skill 帮 AI 助手检查本机环境并给出处理步骤，适合 Claude 网页版和 Claude Code 用户。
 
-能检查时区与终端语言、部分系统语言/区域信息、Claude 配置字段、认证来源差异、相关目录是否存在及 PATH 中的安装数量。可选探测官方站点，并对常见错误初步分流。浏览器、实际登录身份和受管配置由助手按指引补查。
+默认检查出口 IP：所在国家是否在 [Anthropic 官方支持地区名单](https://www.anthropic.com/legal/supported-regions)、是否被标记为机房 IP 或代理、IP 时区与电脑时区是否一致；有终端代理时直连和代理两条出口都查。还检查系统语言、终端语言、Claude 配置字段、认证来源差异、相关目录是否存在及 PATH 中的安装数量，探测官方站点可达性，并对常见错误初步分流。浏览器、实际登录身份和受管配置由助手按指引补查。
+
+出口 IP 不在支持名单时标“需处理”。官方政策按人实际所在地判断，人在不受支持的地区，换 IP 也不合规。机房 IP、代理标记、时区不一致标“待确认”：它们是排查线索，Anthropic 没有公布与封号的关系。
 
 还提供修复流程：助手在确认范围后，使用宿主工具清理指定浏览器的 Claude 站点数据、备份并隔离选定旧数据、卸载重装 Claude Code 或 Desktop。需要宿主具备浏览器/桌面操作及终端权限；不是独立的一键清理程序。
 
@@ -16,7 +18,7 @@ Claude 突然不能用了，先弄清是登录、配置、网络还是账号与�
 
 下载仓库后，让支持本地 Skill 的 AI 助手读取根目录 `SKILL.md`，然后说：
 
-> 用 claude-check-skill 检查我的 Claude 环境，重点看时区、电脑语言和旧账号登录问题。
+> 用 claude-check-skill 检查我的 Claude 环境，重点看出口 IP、时区、电脑语言和旧账号登录问题。
 
 不同宿主的安装目录不同，按宿主说明放入完整文件夹；本项目不自动修改任何宿主配置。也可以不安装 Skill，直接运行脚本。需要 Python 3.9+，没有第三方依赖：
 
@@ -34,13 +36,13 @@ python3 scripts/check.py --project /path/to/your-project --json
 printf '%s' 'Your organization has been disabled' | python3 scripts/check.py --error-stdin
 ```
 
-可选联网检查（会直接访问 claude.ai，官方站点可看到出口 IP）：
+默认会联网：向 ipify 取出口 IP，向 ipinfo.io、ip-api.com（免费版为 http）查地区、运营方、机房 / 代理标记和时区，再向 claude.ai 发一次无凭证 HEAD 请求。这些服务会看到你的出口 IP；报告开头会写明，报告里 IP 只显示前半段。不想联网时：
 
 ```bash
-python3 scripts/check.py --network --samples 3
+python3 scripts/check.py --offline
 ```
 
-网络测试不带账号凭证，不跟随重定向，不使用系统代理配置；只说明直连链路的短时结果。它不验证登录、API 请求或代理可用性。默认运行完全不联网。
+claude.ai 探测不带账号凭证，不跟随重定向，不走代理；返回 403 且带 `cf-mitigated: challenge` 是 Cloudflare 人机验证拦下了脚本请求，说明网络可达。多采样用 `--samples 3`。它不验证登录、API 请求或代理可用性。支持地区名单随包保存在 `scripts/supported_regions.json`，注明官方来源和生效日期；名单更新后需同步。
 
 ## 隐私与限制
 
@@ -48,9 +50,10 @@ python3 scripts/check.py --network --samples 3
 
 - 不读取登录凭证文件、Cookie、Keychain 或聊天历史，不执行 apiKeyHelper，也不自动运行发现的 Claude 可执行文件。settings 与进程环境中的认证字段仅在内存中比较，不输出值。
 - 配置文件只解析已知检查字段；超过 1 MiB、格式错误或文件本身是符号链接时跳过。不公开配置值和安装路径。
-- Mac/Windows 自动校时、Linux 桌面语言、浏览器语言与时区需要按 Skill 指引补查。脚本不会调整系统设置、退出账号或清理目录。
+- Mac/Windows 自动校时、Linux 桌面会话语言、浏览器语言与时区需要按 Skill 指引补查。脚本不会调整系统设置、退出账号或清理目录。
+- IP 库可能过时，各家定位也可能不同；出现分歧时报告会列出。共享 IP 过去被谁用过，本工具看不到。
 - 目录存在不等于旧账号残留；本机环境正常不等于服务端账户正常。三次网络采样也不能证明长期稳定。
-- 输出仍包含时区、语言和配置字段存在信息；对外分享前核对这些信息是否适合公开。没有遥测或自动上传。
+- 输出仍包含时区、语言和配置字段存在信息；对外分享前核对这些信息是否适合公开。除上面列出的 IP 查询和 claude.ai 探测外，没有遥测或自动上传。
 
 机制来源和错误处理见 [报错与证据](references/diagnosis.md)。
 

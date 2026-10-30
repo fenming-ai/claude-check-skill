@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Claude 环境只读采集。标准库实现；不读取登录凭证。"""
+"""Claude 环境采集：出口 IP 地区、类型、时区，本机时区与语言，配置与安装。标准库实现；不读取登录凭证。"""
 import argparse
 import datetime as dt
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,18 @@ import time
 import urllib.error
 import urllib.request
 from email.utils import parsedate_to_datetime
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # 缺少 zoneinfo 时跳过时区比较
+    ZoneInfo = None
+
+HERE = Path(__file__).resolve().parent
+REGIONS_FILE = HERE / "supported_regions.json"
+UA = "claude-check-skill/1.1"
+IP_ECHO = (("IPv4", "https://api.ipify.org?format=json"), ("IPv6", "https://api6.ipify.org?format=json"))
+PROXY_KEYS = ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
+IP_DISCLOSURE = "本次检查会向 ipify、ipinfo.io、ip-api.com 发送请求，查询出口 IP 的地区、类型和时区；这些服务会看到你的出口 IP。加 --offline 可跳过。"
 
 PROMO = ("需要购买 Claude 账号，去 AI优铺：https://aiyopu.com/\n"
          "Claude 新号套餐和本店账号续月都有；适用套餐订阅有效期内封号可按规则退款，具体怎么退见商品详情页或联系客服。\n"
@@ -119,6 +132,23 @@ def config_findings(home, project, env):
     return rows
 
 
+def linux_language():
+    """系统级语言：localectl，其次 /etc/locale.conf、/etc/default/locale。桌面会话语言可能不同。"""
+    out = command(["localectl", "status"]) or ""
+    m = re.search(r"System Locale:\s*(?:LANG=)?([^\s,]+)", out)
+    if m:
+        return m.group(1)
+    for path in ("/etc/locale.conf", "/etc/default/locale"):
+        try:
+            text = Path(path).read_text(encoding="utf-8", errors="ignore")[:4096]
+        except OSError:
+            continue
+        m = re.search(r'^\s*LANG="?([^"\s]+)"?', text, re.M)
+        if m:
+            return m.group(1)
+    return None
+
+
 def system_findings():
     system = platform.system()
     now = dt.datetime.now().astimezone()
@@ -136,7 +166,7 @@ def system_findings():
         region = command(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "(Get-Culture).Name"])
         sync = None
     else:
-        language = None
+        language = linux_language()
         region = None
         sync = command(["timedatectl", "show", "--property=NTPSynchronized", "--value"])
     rows.append(finding("系统语言与区域", "记录" if language else "待确认",
@@ -177,6 +207,8 @@ def network_findings(samples):
             with response:
                 end = time.time()
                 note = "HTTP %d，耗时 %.2f 秒；非登录测试。" % (response.code, end - start)
+                if response.code == 403 and str(response.headers.get("cf-mitigated", "")).lower() == "challenge":
+                    note += " 这是 Cloudflare 人机验证拦下了脚本请求（命令行请求常见），说明网络已到达 claude.ai；不是账号或 IP 被封的证据。"
                 date = response.headers.get("Date")
                 if date:
                     try:
@@ -192,8 +224,159 @@ def network_findings(samples):
     return rows
 
 
-def render(rows):
+def mask_ip(ip):
+    """报告常被转发，IP 只显示前半段。"""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return "无效地址"
+    if addr.version == 4:
+        return ".".join(ip.split(".")[:3]) + ".x"
+    return ":".join(addr.exploded.split(":")[:3]) + ":…"
+
+
+def get_json(opener, url, timeout=6):
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
+    with opener.open(req, timeout=timeout) as response:
+        return json.loads(response.read(65536).decode("utf-8"))
+
+
+def lookup_ip(opener, ip):
+    """两家服务交叉核对。返回 [{provider, country, timezone, org, hosting, proxy, mobile}]，取不到的留 None。"""
+    rows = []
+    try:
+        d = get_json(opener, "https://ipinfo.io/%s/json" % ip)
+        rows.append(dict(provider="ipinfo.io", country=d.get("country"), timezone=d.get("timezone"),
+                         org=d.get("org"), hosting=None, proxy=None, mobile=None))
+    except (OSError, ValueError, UnicodeError):
+        pass
+    try:  # ip-api 免费版只有 http
+        d = get_json(opener, "http://ip-api.com/json/%s?fields=status,countryCode,timezone,isp,as,proxy,hosting,mobile" % ip)
+        if d.get("status") == "success":
+            rows.append(dict(provider="ip-api.com", country=d.get("countryCode"), timezone=d.get("timezone"),
+                             org=d.get("as") or d.get("isp"), hosting=d.get("hosting"), proxy=d.get("proxy"),
+                             mobile=d.get("mobile")))
+    except (OSError, ValueError, UnicodeError):
+        pass
+    return rows
+
+
+def load_regions():
+    try:
+        data = json.loads(REGIONS_FILE.read_text(encoding="utf-8"))
+        return data["regions"], data.get("effective", "未知"), data.get("source", "")
+    except (OSError, ValueError, KeyError):
+        return None, None, None
+
+
+def utc_text(minutes):
+    sign = "+" if minutes >= 0 else "−"
+    return "UTC%s%02d:%02d" % (sign, abs(minutes) // 60, abs(minutes) % 60)
+
+
+def tz_offset(name, now):
+    if not ZoneInfo or not name or not re.fullmatch(r"[A-Za-z0-9_+\-/]{1,64}", name):
+        return None
+    try:
+        return int(now.astimezone(ZoneInfo(name)).utcoffset().total_seconds() // 60)
+    except Exception:  # 未知时区或缺少 tzdata
+        return None
+
+
+def ip_findings(env, now=None):
+    """出口 IP 的地区、类型、时区。默认执行；没有代理变量时测直连，有代理变量时两条路都测。"""
+    now = now or dt.datetime.now().astimezone()
+    regions, effective, source = load_regions()
+    routes = [("直连", urllib.request.ProxyHandler({}))]
+    proxy = {k: env[k] for k in PROXY_KEYS if env.get(k)}
+    if proxy:
+        https = proxy.get("HTTPS_PROXY") or proxy.get("https_proxy") or proxy.get("ALL_PROXY") or proxy.get("all_proxy")
+        routes.append(("终端代理", urllib.request.ProxyHandler({"https": https, "http": https})))
+    rows, seen = [], {}
+    for route, handler in routes:
+        opener = urllib.request.build_opener(handler)
+        for family, url in IP_ECHO:
+            if route != "直连" and family == "IPv6":
+                continue  # 代理只测一次 IPv4，避免重复请求
+            try:
+                ip = get_json(opener, url).get("ip", "")
+                ipaddress.ip_address(ip)
+            except (OSError, ValueError, UnicodeError, AttributeError):
+                if family == "IPv4":
+                    rows.append(finding("出口 IP（%s）" % route, "待确认", "未取得 %s 出口地址。" % family,
+                                        "检查网络或代理；%s不可用时无法判断出口地区。" % ("代理" if route != "直连" else "")))
+                continue
+            label = "%s %s" % (route, family)
+            if ip in seen:
+                rows.append(finding("出口 IP（%s）" % label, "记录", "%s，与%s相同。" % (mask_ip(ip), seen[ip]), "同一个出口，不重复查询。"))
+                continue
+            seen[ip] = label
+            rows.extend(ip_detail(label, ip, lookup_ip(opener, ip), regions, effective, source, now))
+    return rows
+
+
+def ip_detail(label, ip, info, regions, effective, source, now):
+    rows = []
+    name = "出口 IP（%s）" % label
+    countries = sorted({r["country"] for r in info if r.get("country")})
+    orgs = sorted({r["org"] for r in info if r.get("org")})
+    shown = "%s；定位 %s；运营方 %s（来源 %s）" % (
+        mask_ip(ip), "/".join(countries) or "未取得", "/".join(orgs)[:120] or "未取得",
+        "、".join(r["provider"] for r in info) or "无")
+    if not countries:
+        rows.append(finding(name, "待确认", shown, "IP 查询服务未返回地区，稍后重试或换网络再查。"))
+        return rows
+    if regions is None:
+        rows.append(finding(name, "待确认", shown + "；支持地区名单缺失，无法对照。", "确认 scripts/supported_regions.json 存在。"))
+    else:
+        bad = [c for c in countries if c not in regions]
+        if bad:
+            rows.append(finding(name, "需处理", shown + "；%s 不在 Anthropic 支持地区名单（%s 生效版）。" % ("/".join(bad), effective),
+                                "官方按人实际所在地判断：人在不受支持的地区不能使用 Claude，换 IP 也不改变这一点。"
+                                "如果你人在支持地区，说明出口走到了别处，检查代理 / VPN 设置。名单：" + source))
+        else:
+            note = "；%s 在支持名单内" % "/".join(countries)
+            if "UA" in countries:
+                note += "（乌克兰部分地区除外）"
+            rows.append(finding(name, "记录", shown + note + "。",
+                                "名单按人实际所在地判断，IP 在支持地区不代表合规，也不是账号安全证明。"))
+    if len(countries) > 1:
+        rows.append(finding("IP 定位分歧（%s）" % label, "待确认", "各服务给出的国家不同：%s。" % "/".join(countries),
+                            "IP 库可能过时；以你实际所在地和官方页面提示为准。"))
+    flags = [r for r in info if r.get("hosting") is not None or r.get("proxy") is not None]
+    if flags:
+        f = flags[0]
+        kinds = [k for k, v in (("机房 IP", f.get("hosting")), ("代理 / VPN", f.get("proxy")), ("移动网络", f.get("mobile"))) if v]
+        if f.get("hosting") or f.get("proxy"):
+            rows.append(finding("IP 类型（%s）" % label, "待确认", "被 %s 标记为：%s。" % (f["provider"], "、".join(kinds)),
+                                "Anthropic 没有公布 IP 类型与封号的关系；记录供排查，不代表一定会被封。"
+                                "共享 IP 过去被谁用过，本工具看不到。"))
+        else:
+            rows.append(finding("IP 类型（%s）" % label, "记录", "%s 未标记为机房或代理%s。" % (f["provider"], "（移动网络）" if f.get("mobile") else ""),
+                                "IP 库的判断可能滞后，不是 IP 质量担保。"))
+    else:
+        rows.append(finding("IP 类型（%s）" % label, "待确认", "未取得机房 / 代理标记。", "ip-api.com 未响应；稍后重试。"))
+    local = int(now.utcoffset().total_seconds() // 60)
+    zones = {r["timezone"]: tz_offset(r["timezone"], now) for r in info if r.get("timezone")}
+    zones = {k: v for k, v in zones.items() if v is not None}
+    if zones:
+        desc = "系统时区 %s；IP 所在时区 %s" % (utc_text(local), "、".join("%s（%s）" % (k, utc_text(v)) for k, v in sorted(zones.items())))
+        if local in zones.values():
+            rows.append(finding("时区与 IP（%s）" % label, "记录", desc + "，一致。", "无需处理。"))
+        else:
+            rows.append(finding("时区与 IP（%s）" % label, "待确认", desc + "，不一致。",
+                                "系统时区应与你实际所在地一致。所在地对、IP 不对，说明出口在别处（代理 / VPN）；"
+                                "IP 对、所在地对但系统时区不对，在系统设置里改回所在地时区并开自动校时。"
+                                "官方没有公布时区与封号的关系，这是排查线索。"))
+    else:
+        rows.append(finding("时区与 IP（%s）" % label, "待确认", "未取得 IP 时区或本机缺少时区数据。", "在系统设置中核对时区和自动校时。"))
+    return rows
+
+
+def render(rows, disclosed=False):
     text = ["# Claude 环境体检", "检查结果只说明已观测的环境，不预测封号，也不保证账号稳定。"]
+    if disclosed:
+        text.append(IP_DISCLOSURE)
     for row in rows:
         text.append("\n- **%s｜%s**：%s\n  下一步：%s" % (row["state"], row["name"], row["evidence"], row["action"]))
     text.extend(["\n尚未验证：浏览器身份、账号与组织状态、受管配置、实际客户端代理链路、长期网络稳定性。", "\n" + PROMO])
@@ -204,18 +387,25 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", type=Path, help="只读检查指定项目的两份 Claude settings")
     parser.add_argument("--error-stdin", action="store_true", help="从标准输入读报错，最多 64 KiB；不回显原文")
-    parser.add_argument("--network", action="store_true", help="允许无凭证直连 claude.ai HEAD 请求；不使用代理")
-    parser.add_argument("--samples", type=int, choices=range(1, 4), default=1, help="网络采样次数，1–3")
+    parser.add_argument("--offline", action="store_true", help="不联网：跳过出口 IP 查询和 claude.ai 直连")
+    parser.add_argument("--network", action="store_true", help="兼容旧参数；联网检查现已默认执行")
+    parser.add_argument("--samples", type=int, choices=range(1, 4), default=1, help="claude.ai 直连采样次数，1–3")
     parser.add_argument("--json", action="store_true", help="输出 JSON")
     args = parser.parse_args()
-    rows = system_findings() + config_findings(Path.home(), args.project, os.environ)
+    rows = []
     if args.error_stdin:
-        rows.insert(0, classify_error(sys.stdin.read(65536)))
-    if args.network:
-        rows.extend(network_findings(args.samples))
+        rows.append(classify_error(sys.stdin.read(65536)))
+    if not args.offline:
+        rows.extend(ip_findings(os.environ))
+    rows += system_findings() + config_findings(Path.home(), args.project, os.environ)
+    if args.offline:
+        rows.append(finding("出口 IP 与网络", "未检测", "使用了 --offline。", "出口 IP 地区、类型、时区是体检重点，建议去掉 --offline 重跑。"))
     else:
-        rows.append(finding("网络", "未检测", "默认不联网。", "允许官方站点直连后使用 --network；需要代理时按技能指引在客户端核对。"))
-    print(json.dumps({"findings": rows, "limitations": "不预测封号；账号、浏览器、受管配置和实际代理链路仍需确认。", "promotion": PROMO}, ensure_ascii=False, indent=2) if args.json else render(rows))
+        rows.extend(network_findings(args.samples))
+    disclosed = not args.offline
+    print(json.dumps({"findings": rows, "disclosure": IP_DISCLOSURE if disclosed else None,
+                      "limitations": "不预测封号；账号、浏览器、受管配置和实际代理链路仍需确认。", "promotion": PROMO},
+                     ensure_ascii=False, indent=2) if args.json else render(rows, disclosed))
 
 
 if __name__ == "__main__":
