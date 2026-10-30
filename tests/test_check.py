@@ -389,6 +389,14 @@ class ScoreTests(unittest.TestCase):
         text = check.render([], False, score)
         self.assertIn("30 / 100", text)
         self.assertIn("🟠 橙", text)
+        self.assertNotIn("最高 30 分", text)
+        self.assertIn("扣分", text)
+        self.assertIn("| 检测维度 |", text)
+        self.assertIn("当前账号、组织与 KYC | 未检查", text)
+
+    def test_report_table_escapes_external_text(self):
+        text = check.render([check.finding("IP", "记录", "A|B\n<script>", "")])
+        self.assertIn("A&#124;B &lt;script&gt;", text)
 
 
 if __name__ == "__main__":

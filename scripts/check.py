@@ -659,12 +659,26 @@ def render(rows, disclosed=False, score=None):
         text.append(IP_DISCLOSURE)
     if score and score.get("score") is not None:
         text.append("\n## %s：%d / 100　%s" % (SCORE_NAME, score["score"], score["level"]))
-        text.extend("- " + item for item in score["items"])
     elif score:
         text.append("\n## %s：未计算（%s）" % (SCORE_NAME, score["reason"]))
-    text.append("\n**" + summary(rows) + "**")
+    issues = [row for row in rows if row["state"] in ("需处理", "待确认") and row["evidence"]]
+    conclusion = "；".join(row["evidence"].rstrip("。") for row in issues[:2]) if issues else summary(rows)
+    text.append("\n**一句话结论：" + conclusion + "。**")
+    text.append("\n| 检测维度 | 状态 | 结果 |\n|---|---|---|")
+
+    def cell(value):
+        return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("|", "&#124;").replace("\n", " ").replace("\r", " ")
+
     for row in rows:
-        text.append("\n- **%s｜%s**：%s\n  下一步：%s" % (row["state"], row["name"], row["evidence"], row["action"]))
+        text.append("| %s | %s | %s |" % (cell(row["name"]), cell(row["state"]), cell(row["evidence"])))
+    for dimension in ("浏览器语言、时区与出口", "当前账号、组织与 KYC", "受管配置", "实际 Claude 请求出口", "长期网络稳定性"):
+        text.append("| %s | 未检查 | 本脚本未验证 |" % dimension)
+    if score and score.get("score") is not None:
+        items = [re.sub(r"最高 \d+ 分", "扣分", item) for item in score["items"]
+                 if not item.startswith(("保底", "封顶"))]
+        text.append("\n**扣分说明：**" + "；".join(items) + "。")
+    if issues:
+        text.append("\n**建议：**" + issues[0]["action"])
     text.extend(["\n尚未验证：浏览器身份、账号与组织状态、受管配置、实际客户端代理链路、长期网络稳定性。", "\n" + PROMO])
     return "\n".join(text)
 
