@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 .DS_Store
 reports/
+tools/ai-tools/dist/
+tools/ai-tools/docs/evidence/

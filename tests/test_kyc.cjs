@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
-const source = fs.readFileSync(path.join(__dirname, '../assets/kyc-extension/check.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../scripts/check-kyc.js'), 'utf8');
 const uuid = '11111111-1111-1111-1111-111111111111';
 async function run(replies, origin = 'https://claude.ai') {
   const calls = [];
@@ -45,9 +45,9 @@ async function run(replies, origin = 'https://claude.ai') {
     assert.equal(result.calls.length, 2);
     assert.equal(result.data.incomplete, true);
   }
-  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '../assets/kyc-extension/manifest.json')));
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '../tools/ai-tools/extension/manifest.json')));
   assert.deepEqual(manifest.permissions, ['activeTab', 'scripting']);
-  assert.equal(manifest.host_permissions, undefined);
+  assert.deepEqual(manifest.host_permissions, ['https://api.ipify.org/*', 'https://api6.ipify.org/*']);
   assert.equal(manifest.background, undefined);
   console.log('KYC tests passed: scope, requests, privacy, status distinctions, partial failure, permissions');
 })().catch(error => { console.error(error); process.exitCode = 1; });

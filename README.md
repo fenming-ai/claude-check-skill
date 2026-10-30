@@ -8,7 +8,9 @@ Claude 突然不能用了，先弄清是登录、配置、网络还是账号与�
 
 **它不能预测封号，也不能保证账号不封。** 不因中文、时区或缓存存在就判定危险。
 
-支持 [KYC 状态查询](references/kyc.md)：助手优先在用户指定的已登录 Claude 页面查询；也可加载随包 `assets/kyc-extension/` Chrome 扩展。区分“当前无需验证”和“已通过验证”，不把两者都写成安全。当前采用已有扩展使用的网页内部接口，真实账号接口尚待验收，失败会明确报未知。
+支持 [KYC 状态查询](references/kyc.md)：助手默认先检查扩展是否已安装，没有就协助加载随包 `tools/ai-tools/extension/`，再打开已登录的 Claude 页面查询。免安装脚本只是浏览器工具明确支持时的可选方案。区分“当前无需验证”和“已通过验证”；采用网页内部接口，真实账号接口尚待验收。
+
+完整迁入的 [AI Tools 工具集](tools/ai-tools/README.md) 还包含浏览器 IPv4/IPv6、语言/时区、WebRTC 检查，本机 DNS/TLS/直连与代理诊断、JSON/HTML 报告，以及 Claude 会话查找和 Markdown 导出。六页工具说明、源码、构建和测试脚本均随仓库提供。原项目保留；未复制历史 HAR、真实数据或旧验收记录。
 
 ## 开始使用
 
@@ -67,6 +69,8 @@ Cookie 和站点存储可以按站点处理；HTTP 缓存不一定有同等精�
 ```bash
 python3 -m unittest discover -s tests -v
 node tests/test_kyc.cjs
+cd tools/ai-tools
+bash scripts/verify.sh
 ```
 
 测试覆盖配置异常、凭证不回显、认证来源差异、相似错误分流与报告推广信息。跨平台分支不代表已在每个平台实机验证。

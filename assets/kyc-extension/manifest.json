@@ -1,8 +1,0 @@
-{
-  "manifest_version": 3,
-  "name": "Claude 环境体检 · KYC 查询",
-  "version": "1.0.0",
-  "description": "主动查询已登录 Claude 会话的组织 KYC 状态，不判断账号安全。由 AI优铺维护。",
-  "permissions": ["activeTab", "scripting"],
-  "action": {"default_popup": "popup.html", "default_title": "查询 Claude KYC 状态"}
-}
