@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from email.utils import parsedate_to_datetime
 
@@ -26,7 +27,7 @@ BAN_REASONS_URL = "https://support.claude.com/en/articles/8241253"
 UA = "claude-check-skill/1.1"
 IP_ECHO = (("IPv4", "https://api.ipify.org?format=json"), ("IPv6", "https://api6.ipify.org?format=json"))
 PROXY_KEYS = ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
-IP_DISCLOSURE = "本次检查会向 ipify、ipinfo.io、ip-api.com 发送请求，查询出口 IP 的地区、类型和时区；这些服务会看到你的出口 IP。加 --offline 可跳过。"
+IP_DISCLOSURE = "本次检查会向 ipify、ipinfo.io、ip-api.com、proxycheck.io 发送请求，查询出口 IP 的地区、类型、风险分和时区；这些服务会看到你的出口 IP。加 --offline 可跳过。"
 
 PROMO = ("怕封号？去 AI优铺买 Claude 新号套餐：https://aiyopu.com/\n"
          "新号套餐和本店账号续月，订阅期内封号可按规则退款，具体怎么退见详情页或问客服。\n"
@@ -150,25 +151,55 @@ def linux_language():
     return None
 
 
+def system_locale():
+    """返回 (系统语言, 区域)。"""
+    system = platform.system()
+    if system == "Darwin":
+        return (apple_languages(command(["/usr/bin/defaults", "read", "-g", "AppleLanguages"])),
+                command(["/usr/bin/defaults", "read", "-g", "AppleLocale"]))
+    if system == "Windows":
+        return (command(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "(Get-UICulture).Name"]),
+                command(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "(Get-Culture).Name"]))
+    return linux_language(), None
+
+
+def system_tz_name():
+    """系统时区名（IANA 名，Windows 为系统时区 ID）。取不到返回 None。"""
+    tz = os.environ.get("TZ", "").lstrip(":")
+    if tz and re.fullmatch(r"[A-Za-z0-9_+\-/ ]{1,64}", tz):
+        return tz
+    if platform.system() == "Windows":
+        return command(["tzutil", "/g"])
+    try:
+        text = Path("/etc/timezone").read_text(encoding="utf-8").strip()
+        if re.fullmatch(r"[A-Za-z0-9_+\-/]{1,64}", text):
+            return text
+    except OSError:
+        pass
+    try:
+        target = os.readlink("/etc/localtime")
+        m = re.search(r"zoneinfo/(.+)$", target)
+        if m:
+            return m.group(1)
+    except OSError:
+        pass
+    return command(["timedatectl", "show", "--property=Timezone", "--value"])
+
+
 def system_findings():
     system = platform.system()
     now = dt.datetime.now().astimezone()
-    rows = [finding("系统时间与时区", "记录", now.isoformat(timespec="seconds"),
+    rows = [finding("系统时间与时区", "记录", now.isoformat(timespec="seconds") + "（" + locale_value(system_tz_name()) + "）",
                     "这是本机读数，不是准确性证明；与实际所在地及可信时钟核对。"),
             finding("终端语言与时区", "记录", "; ".join(key + "=" + locale_value(os.environ[key])
                     for key in ("TZ", "LANG", "LC_ALL", "LC_TIME", "LC_MESSAGES") if key in os.environ) or "未设置相关变量。",
                     "终端语言不能代替系统或浏览器语言；差异本身不是封号证据。")]
+    language, region = system_locale()
     if system == "Darwin":
-        language = apple_languages(command(["/usr/bin/defaults", "read", "-g", "AppleLanguages"]))
-        region = command(["/usr/bin/defaults", "read", "-g", "AppleLocale"])
         sync = None  # 不用需要 sudo 的 systemsetup，不提升权限。
     elif system == "Windows":
-        language = command(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "(Get-UICulture).Name"])
-        region = command(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "(Get-Culture).Name"])
         sync = None
     else:
-        language = linux_language()
-        region = None
         sync = command(["timedatectl", "show", "--property=NTPSynchronized", "--value"])
     rows.append(finding("系统语言与区域", "记录" if language else "待确认",
                         "语言：" + locale_value(language) + "；区域：" + locale_value(region),
@@ -242,13 +273,24 @@ def get_json(opener, url, timeout=6):
         return json.loads(response.read(65536).decode("utf-8"))
 
 
-def lookup_ip(opener, ip):
-    """两家服务交叉核对。返回 [{provider, country, timezone, org, hosting, proxy, mobile}]，取不到的留 None。"""
+def lookup_ip(opener, ip, token=None):
+    """两家服务交叉核对。返回 [{provider, country, timezone, org, hosting, proxy, mobile, ...}]，取不到的留 None。
+    设置 IPINFO_TOKEN 时用 ipinfo 付费字段（privacy、asn.type）；令牌只发给 ipinfo，不进报告。"""
     rows = []
     try:
-        d = get_json(opener, "https://ipinfo.io/%s/json" % ip)
-        rows.append(dict(provider="ipinfo.io", country=d.get("country"), city=d.get("city"), timezone=d.get("timezone"),
-                         org=d.get("org"), hosting=None, proxy=None, mobile=None))
+        if token:
+            d = get_json(opener, "https://ipinfo.io/%s?%s" % (ip, urllib.parse.urlencode({"token": token})))
+        else:
+            d = get_json(opener, "https://ipinfo.io/%s/json" % ip)
+        privacy = d.get("privacy") if isinstance(d.get("privacy"), dict) else None
+        asn = d.get("asn") if isinstance(d.get("asn"), dict) else {}
+        row = dict(provider="ipinfo.io", country=d.get("country"), city=d.get("city"), timezone=d.get("timezone"),
+                   org=d.get("org") or " ".join(x for x in (asn.get("asn"), asn.get("name")) if x) or None,
+                   hosting=None, proxy=None, mobile=None, paid=bool(privacy), asn_type=asn.get("type"))
+        if privacy:
+            row.update(hosting=bool(privacy.get("hosting")),
+                       proxy=any(bool(privacy.get(k)) for k in ("vpn", "proxy", "tor", "relay")))
+        rows.append(row)
     except (OSError, ValueError, UnicodeError):
         pass
     try:  # ip-api 免费版只有 http
@@ -259,7 +301,38 @@ def lookup_ip(opener, ip):
                              mobile=d.get("mobile")))
     except (OSError, ValueError, UnicodeError):
         pass
+    try:  # 免费、无需令牌，每台机器每天约 100 次；给出 IP 类型和 0–100 风险分
+        d = get_json(opener, "https://proxycheck.io/v2/%s?vpn=1&asn=1&risk=1" % ip)
+        x = d.get(ip) if d.get("status") in ("ok", "warning") and isinstance(d.get(ip), dict) else None
+        if x:
+            risk = x.get("risk")
+            rows.append(dict(provider="proxycheck.io", country=x.get("isocode"), city=x.get("city"), timezone=x.get("timezone"),
+                             org=" ".join(v for v in (x.get("asn"), x.get("provider")) if v) or None,
+                             hosting=None, proxy=x.get("proxy") == "yes", mobile=None,
+                             pc_type=str(x.get("type") or "")[:40] or None,
+                             risk=int(risk) if str(risk).isdigit() else None))
+    except (OSError, ValueError, UnicodeError):
+        pass
     return rows
+
+
+STRONG_PROXY_TYPES = {"TOR", "SOCKS", "SOCKS4", "SOCKS4A", "SOCKS5", "SOCKS5H", "HTTP", "HTTPS", "COMPROMISED SERVER", "SHADOWSOCKS"}
+
+
+def classify(info):
+    """合并各来源的 IP 类型判断。两家以上标代理、或 proxycheck 标为明确代理协议才算“认定代理”；只有一家标记算“疑似”。"""
+    sources = [r["provider"] for r in info if r.get("proxy")]
+    pc = next((r for r in info if r["provider"] == "proxycheck.io"), {})
+    pc_type = (pc.get("pc_type") or "").upper()
+    asn_type = next((r.get("asn_type") for r in info if r.get("asn_type")), None)
+    confirmed = len(sources) >= 2 or pc_type in STRONG_PROXY_TYPES or any(r.get("paid") and r.get("proxy") for r in info)
+    return dict(
+        confirmed_proxy=confirmed, suspected_proxy=bool(sources) and not confirmed, proxy_sources=sources,
+        residential=pc_type in ("RESIDENTIAL", "WIRELESS") or asn_type == "isp",
+        hosting=any(r.get("hosting") for r in info) or pc_type == "HOSTING" or asn_type == "hosting",
+        mobile=any(r.get("mobile") for r in info) or pc_type == "WIRELESS",
+        pc_type=pc.get("pc_type"), risk=pc.get("risk"), asn_type=asn_type,
+        known=any(r.get("hosting") is not None or r.get("proxy") is not None for r in info))
 
 
 def load_regions():
@@ -284,10 +357,12 @@ def tz_offset(name, now):
         return None
 
 
-def ip_findings(env, now=None):
+def ip_findings(env, now=None, facts=None):
     """出口 IP 的地区、类型、时区。默认执行；没有代理变量时测直连，有代理变量时两条路都测。"""
     now = now or dt.datetime.now().astimezone()
     regions, effective, source = load_regions()
+    token = env.get("IPINFO_TOKEN") or None
+    facts = facts if facts is not None else []
     routes = [("直连", urllib.request.ProxyHandler({}))]
     proxy = {k: env[k] for k in PROXY_KEYS if env.get(k)}
     if proxy:
@@ -312,13 +387,13 @@ def ip_findings(env, now=None):
                 rows.append(finding("出口 IP（%s %s）" % (route, family), "记录", "%s，与%s相同。" % (mask_ip(ip), seen[ip]), "同一个出口，不重复查询。"))
                 continue
             seen[ip] = "%s %s" % (route, family)
-            found.append((family, ip, lookup_ip(opener, ip)))
+            found.append((family, ip, lookup_ip(opener, ip, token)))
         # IPv4 与 IPv6 落在同一地区、同一运营方、同样标记时合并成一组，避免重复刷屏
         if len(found) == 2 and signature(found[0][2]) == signature(found[1][2]):
-            rows.extend(ip_detail(route, [found[0][1], found[1][1]], found[0][2], regions, effective, source, now))
+            rows.extend(ip_detail(route, [found[0][1], found[1][1]], found[0][2], regions, effective, source, now, facts, route))
         else:
             for family, ip, info in found:
-                rows.extend(ip_detail("%s %s" % (route, family), ip, info, regions, effective, source, now))
+                rows.extend(ip_detail("%s %s" % (route, family), ip, info, regions, effective, source, now, facts, route))
     return rows
 
 
@@ -343,7 +418,7 @@ def signature(info):
             tuple((r.get("hosting"), r.get("proxy")) for r in info if r.get("hosting") is not None or r.get("proxy") is not None))
 
 
-def ip_detail(label, ips, info, regions, effective, source, now):
+def ip_detail(label, ips, info, regions, effective, source, now, facts=None, route=None):
     rows = []
     ips = [ips] if isinstance(ips, str) else ips
     name = "出口 IP（%s）" % label
@@ -355,6 +430,7 @@ def ip_detail(label, ips, info, regions, effective, source, now):
     if len(ips) > 1:
         shown += "；IPv4 与 IPv6 结果相同，合并显示"
     region_bad = False
+    tz_match = None
     if not countries:
         rows.append(finding(name, "待确认", shown, "IP 查询服务未返回地区，稍后重试或换网络再查。"))
         return rows
@@ -378,29 +454,39 @@ def ip_detail(label, ips, info, regions, effective, source, now):
     if len(countries) > 1:
         rows.append(finding("IP 定位分歧（%s）" % label, "待确认", "各服务给出的国家不同：%s。" % "/".join(countries),
                             "IP 库可能过时；以你实际所在地和官方页面提示为准。"))
-    flags = [r for r in info if r.get("hosting") is not None or r.get("proxy") is not None]
-    if flags:
-        f = flags[0]
-        kinds = [k for k, v in (("机房 IP", f.get("hosting")), ("代理 / VPN", f.get("proxy")), ("移动网络", f.get("mobile"))) if v]
-        if f.get("proxy"):
-            rows.append(finding("IP 类型（%s）" % label, "需处理", "被 %s 标记为：%s。" % (f["provider"], "、".join(kinds)) +
-                                "高风险（经验判断）：代理 / VPN 出口在社区封号反馈中很常见；Anthropic 没有公布这一条。",
-                                "被标为代理的出口往往被很多人共用、历史不明。人在支持地区的话，直接用本地网络，不要经过代理 / VPN 登录 Claude。"))
-        elif f.get("hosting"):
-            rows.append(finding("IP 类型（%s）" % label, "待确认", "被 %s 标记为：%s。" % (f["provider"], "、".join(kinds)),
-                                "Anthropic 没有公布 IP 类型与封号的关系；记录供排查，不代表一定会被封。"
-                                "共享 IP 过去被谁用过，本工具看不到。"))
-        elif not region_bad:  # 地区已判为需处理时，“未标记”这一行只是噪音
-            rows.append(finding("IP 类型（%s）" % label, "记录", "%s 未标记为机房或代理%s。" % (f["provider"], "（移动网络）" if f.get("mobile") else ""),
-                                "IP 库的判断可能滞后，不是 IP 质量担保。"))
+    c = classify(info)
+    kind = []
+    if c["pc_type"]:
+        kind.append("proxycheck 类型 %s" % c["pc_type"])
+    if c["risk"] is not None:
+        kind.append("风险分 %d/100" % c["risk"])
+    if c["hosting"]:
+        kind.append("机房 IP")
+    if c["residential"]:
+        kind.append("家庭宽带")
+    detail = "；".join(kind)
+    if c["confirmed_proxy"]:
+        rows.append(finding("IP 类型（%s）" % label, "需处理", "认定为代理 / VPN（%s；%s）。" % ("、".join(c["proxy_sources"]) or "代理协议类型", detail) +
+                            "高风险（经验判断）：代理 / VPN 出口在社区封号反馈中很常见；Anthropic 没有公布这一条。",
+                            "被标为代理的出口往往被很多人共用、历史不明。人在支持地区的话，直接用本地网络，不要经过代理 / VPN 登录 Claude。"))
+    elif c["suspected_proxy"]:
+        rows.append(finding("IP 类型（%s）" % label, "待确认", "疑似代理 / VPN：只有 %s 这样标（%s），其他来源未标记。" % ("、".join(c["proxy_sources"]), detail),
+                            "各 IP 库判断不一，机房 IP 常被误标为 VPN。记录供排查；Anthropic 没有公布 IP 类型规则。"))
+    elif c["hosting"]:
+        rows.append(finding("IP 类型（%s）" % label, "待确认", detail + "。",
+                            "机房 IP 不一定会被封；Anthropic 没有公布 IP 类型与封号的关系，记录供排查。"))
+    elif c["known"] and not region_bad:
+        rows.append(finding("IP 类型（%s）" % label, "记录", (detail or "未标记为机房或代理") + "。",
+                            "IP 库的判断可能滞后，不是 IP 质量担保。"))
     elif not region_bad:
-        rows.append(finding("IP 类型（%s）" % label, "待确认", "未取得机房 / 代理标记。", "ip-api.com 未响应；稍后重试。"))
+        rows.append(finding("IP 类型（%s）" % label, "待确认", "未取得 IP 类型。", "IP 查询服务未响应；稍后重试。"))
     local = int(now.utcoffset().total_seconds() // 60)
     zones = {r["timezone"]: tz_offset(r["timezone"], now) for r in info if r.get("timezone")}
     zones = {k: v for k, v in zones.items() if v is not None}
     if zones:
         desc = "系统时区 %s；IP 所在时区 %s" % (utc_text(local), "、".join("%s（%s）" % (k, utc_text(v)) for k, v in sorted(zones.items())))
-        if local in zones.values():
+        tz_match = local in zones.values()
+        if tz_match:
             rows.append(finding("时区与 IP（%s）" % label, "记录", desc + "，一致。", "无需处理。"))
         else:
             rows.append(finding("时区与 IP（%s）" % label, "待确认", desc + "，不一致。",
@@ -409,6 +495,8 @@ def ip_detail(label, ips, info, regions, effective, source, now):
                                 "官方没有公布时区与封号的关系，这是排查线索。"))
     else:
         rows.append(finding("时区与 IP（%s）" % label, "待确认", "未取得 IP 时区或本机缺少时区数据。", "在系统设置中核对时区和自动校时。"))
+    if facts is not None:
+        facts.append(dict(route=route or label, countries=countries, region_bad=region_bad, tz_match=tz_match, **c))
     return rows
 
 
@@ -428,11 +516,102 @@ def summary(rows):
     return "结论：本次已检查项目未发现需处理的问题；%d 项待确认。" % len(check_)
 
 
-def render(rows, disclosed=False):
+CN_ZONES = {"Asia/Shanghai", "Asia/Chongqing", "Asia/Chungking", "Asia/Harbin", "Asia/Urumqi", "Asia/Kashgar", "PRC", "China Standard Time"}
+CN_LANG = re.compile(r"\bzh[-_](CN|Hans[-_]CN)\b", re.I)
+SCORE_NAME = "环境评分（AI优铺经验模型，非 Anthropic 官方；高分不代表不会被封）"
+
+
+def china_signals(tz_name, languages):
+    """电脑设置显示人在中国大陆的迹象。官方按实际所在地判断，所以这类迹象会压低评分。"""
+    out = []
+    if tz_name in CN_ZONES:
+        out.append("电脑时区是中国大陆（%s）" % tz_name)
+    for lang in languages:
+        if lang and CN_LANG.search(lang):
+            out.append("系统或终端语言是简体中文（中国大陆，%s）" % locale_value(lang))
+            break
+    return out
+
+
+def level(score):
+    if score >= 99:
+        return "🟢 纯绿"
+    if score >= 80:
+        return "🟩 偏绿"
+    if score >= 60:
+        return "🟡 黄"
+    if score >= 30:
+        return "🟠 橙"
+    return "🔴 红"
+
+
+def score_env(facts, signals):
+    """满分 99。返回 {score, level, items}；没有可用的出口数据时返回 None。"""
+    usable = [f for f in facts if f.get("countries")]
+    if not usable:
+        return None
+    bad = [f for f in usable if f["region_bad"]]
+    if bad:
+        where = "、".join("%s %s" % (f["route"], "/".join(f["countries"])) for f in bad)
+        return dict(score=5, level=level(5), items=["出口 IP 在不受支持的地区（%s）：直接 5 分" % where])
+    # 有终端代理时以代理出口为准（Claude Code 走这条）；否则用直连
+    f = next((x for x in usable if x["route"] != "直连"), usable[0])
+    us = f["countries"] == ["US"]
+    items, s = [], 88 if us else 75
+    items.append("基础分 %d（出口在%s）" % (s, "美国" if us else "/".join(f["countries"]) + "，支持地区"))
+
+    def add(delta, text):
+        nonlocal s
+        s += delta
+        items.append("%+d %s" % (delta, text))
+    if f["residential"]:
+        add(5, "家庭宽带")
+    elif f["hosting"]:
+        add(-2, "机房 IP")
+    if f["suspected_proxy"]:
+        add(-10, "疑似代理 / VPN（只有 %s 这样标）" % "、".join(f["proxy_sources"]))
+    risk = f.get("risk")
+    if risk is None:
+        items.append("+0 纯度未取得")
+    elif risk <= 33:
+        add(4, "纯度高（风险分 %d）" % risk)
+    elif risk <= 66:
+        items.append("+0 纯度中（风险分 %d）" % risk)
+    else:
+        add(-6, "纯度低（风险分 %d）" % risk)
+    if f["tz_match"] is True:
+        add(3, "电脑时区与 IP 一致")
+    elif f["tz_match"] is False:
+        add(-3, "电脑时区与 IP 不一致")
+    caps = []
+    if f["confirmed_proxy"]:
+        caps.append((35, "认定为代理 / VPN：最高 35 分"))
+    if signals:
+        caps.append((30, "；".join(signals) + "，而出口不在中国：疑似人在中国大陆，最高 30 分"))
+    if not caps and us and not f["suspected_proxy"] and s < 86:
+        items.append("保底 86（美国出口、非代理）")
+        s = 86
+    if s > 99:
+        items.append("封顶 99")
+        s = 99
+    for cap, text in caps:
+        if s > cap:
+            s = cap
+        items.append(text)
+    s = max(1, s)
+    return dict(score=s, level=level(s), items=items)
+
+
+def render(rows, disclosed=False, score=None):
     rows = ordered(rows)
     text = ["# Claude 环境体检", "检查结果只说明已观测的环境，不预测封号，也不保证账号稳定。"]
     if disclosed:
         text.append(IP_DISCLOSURE)
+    if score:
+        text.append("\n## %s：%d / 99　%s" % (SCORE_NAME, score["score"], score["level"]))
+        text.extend("- " + item for item in score["items"])
+    elif disclosed:
+        text.append("\n## %s：未计算（没有取得出口 IP 地区）" % SCORE_NAME)
     text.append("\n**" + summary(rows) + "**")
     for row in rows:
         text.append("\n- **%s｜%s**：%s\n  下一步：%s" % (row["state"], row["name"], row["evidence"], row["action"]))
@@ -452,8 +631,15 @@ def main():
     rows = []
     if args.error_stdin:
         rows.append(classify_error(sys.stdin.read(65536)))
+    facts, score = [], None
     if not args.offline:
-        rows.extend(ip_findings(os.environ))
+        rows.extend(ip_findings(os.environ, facts=facts))
+        language, region = system_locale()
+        signals = china_signals(system_tz_name(), [language, region] + [os.environ.get(k) for k in ("LANG", "LC_ALL")])
+        score = score_env(facts, signals)
+        if signals and score and score["score"] > 5:
+            rows.append(finding("所在地迹象", "需处理", "；".join(signals) + "，但出口 IP 不在中国。",
+                                "官方按人实际所在地判断：人在中国大陆，换成其他地区的 IP 也不合规。如果你人在支持地区，把电脑时区和语言改回实际所在地即可。"))
     rows += system_findings() + config_findings(Path.home(), args.project, os.environ)
     if args.offline:
         rows.append(finding("出口 IP 与网络", "未检测", "使用了 --offline。", "出口 IP 地区、类型、时区是体检重点，建议去掉 --offline 重跑。"))
@@ -461,9 +647,9 @@ def main():
         rows.extend(network_findings(args.samples))
     disclosed = not args.offline
     rows = ordered(rows)
-    print(json.dumps({"summary": summary(rows), "findings": rows, "disclosure": IP_DISCLOSURE if disclosed else None,
+    print(json.dumps({"score": score, "summary": summary(rows), "findings": rows, "disclosure": IP_DISCLOSURE if disclosed else None,
                       "limitations": "不预测封号；账号、浏览器、受管配置和实际代理链路仍需确认。", "promotion": PROMO},
-                     ensure_ascii=False, indent=2) if args.json else render(rows, disclosed))
+                     ensure_ascii=False, indent=2) if args.json else render(rows, disclosed, score))
 
 
 if __name__ == "__main__":

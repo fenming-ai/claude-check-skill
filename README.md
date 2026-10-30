@@ -4,6 +4,8 @@ Claude 突然不能用了，先弄清是登录、配置、网络还是账号与�
 
 默认检查出口 IP：所在国家是否在 [Anthropic 官方支持地区名单](https://www.anthropic.com/legal/supported-regions)、是否被标记为机房 IP 或代理、IP 时区与电脑时区是否一致；有终端代理时直连和代理两条出口都查。还检查系统语言、终端语言、Claude 配置字段、认证来源差异、相关目录是否存在及 PATH 中的安装数量，探测官方站点可达性，并对常见错误初步分流。浏览器、实际登录身份和受管配置由助手按指引补查。
 
+报告开头给出**环境评分**（满分 99；99 纯绿，80 以上偏绿）并列出每项加减分。出口在中国等不受支持的地区直接 5 分；认定为代理最高 35 分；电脑时区或语言在中国大陆而出口在海外最高 30 分；美国出口、非代理时不低于 86 分。评分是 AI优铺的经验模型，不是 Anthropic 官方规则，高分不代表不会被封。IP 类型和纯度（风险分）来自 proxycheck.io，免费、无需令牌；设置 `IPINFO_TOKEN` 时会额外使用 ipinfo 付费字段。
+
 出口 IP 不在支持名单时标“需处理”。官方政策按人实际所在地判断，人在不受支持的地区，换 IP 也不合规。机房 IP、代理标记、时区不一致标“待确认”：它们是排查线索，Anthropic 没有公布与封号的关系。
 
 还提供修复流程：助手在确认范围后，使用宿主工具清理指定浏览器的 Claude 站点数据、备份并隔离选定旧数据、卸载重装 Claude Code 或 Desktop。需要宿主具备浏览器/桌面操作及终端权限；不是独立的一键清理程序。
@@ -36,7 +38,7 @@ python3 scripts/check.py --project /path/to/your-project --json
 printf '%s' 'Your organization has been disabled' | python3 scripts/check.py --error-stdin
 ```
 
-默认会联网：向 ipify 取出口 IP，向 ipinfo.io、ip-api.com（免费版为 http）查地区、运营方、机房 / 代理标记和时区，再向 claude.ai 发一次无凭证 HEAD 请求。这些服务会看到你的出口 IP；报告开头会写明，报告里 IP 只显示前半段。不想联网时：
+默认会联网：向 ipify 取出口 IP，向 ipinfo.io、ip-api.com（免费版为 http）、proxycheck.io 查地区、运营方、机房 / 代理标记、风险分和时区，再向 claude.ai 发一次无凭证 HEAD 请求。这些服务会看到你的出口 IP；报告开头会写明，报告里 IP 只显示前半段。不想联网时：
 
 ```bash
 python3 scripts/check.py --offline

@@ -128,7 +128,7 @@ class IpTests(unittest.TestCase):
         self.assertIn("不代表合规", rows["出口 IP"]["action"])
         self.assertEqual(rows["IP 类型"]["state"], "待确认")
         self.assertIn("机房 IP", rows["IP 类型"]["evidence"])
-        self.assertIn("不代表一定会被封", rows["IP 类型"]["action"])
+        self.assertIn("不一定会被封", rows["IP 类型"]["action"])
         self.assertEqual(rows["时区与 IP"]["state"], "待确认")
         self.assertIn("UTC−07:00", rows["时区与 IP"]["evidence"])
 
@@ -140,8 +140,14 @@ class IpTests(unittest.TestCase):
         self.assertIn("封号原因之一", rows["出口 IP"]["evidence"])
         self.assertIn(check.BAN_REASONS_URL, rows["出口 IP"]["action"])
 
-    def test_proxy_flag_is_high_risk_but_labeled_unofficial(self):
+    def test_single_source_proxy_is_only_suspected(self):
         rows = self.detail([dict(provider="ip-api.com", country="US", timezone="UTC", org="X", hosting=True, proxy=True, mobile=False)])
+        self.assertEqual(rows["IP 类型"]["state"], "待确认")
+        self.assertIn("疑似代理", rows["IP 类型"]["evidence"])
+
+    def test_proxy_flag_is_high_risk_but_labeled_unofficial(self):
+        rows = self.detail([dict(provider="ip-api.com", country="US", timezone="UTC", org="X", hosting=True, proxy=True, mobile=False),
+                            dict(provider="proxycheck.io", country="US", timezone="UTC", org="X", proxy=True, pc_type="VPN", risk=80)])
         self.assertEqual(rows["IP 类型"]["state"], "需处理")
         self.assertIn("代理 / VPN", rows["IP 类型"]["evidence"])
         self.assertIn("经验判断", rows["IP 类型"]["evidence"])
@@ -173,7 +179,7 @@ class IpTests(unittest.TestCase):
             proxied = check.ip_findings({"HTTPS_PROXY": "http://user:SECRET@127.0.0.1:9"})
         self.assertTrue(any("终端代理" in r["name"] for r in proxied))
         self.assertNotIn("SECRET", json.dumps(proxied, ensure_ascii=False))
-        self.assertTrue(all("ipify" in u or "ipinfo" in u or "ip-api" in u for u in calls))
+        self.assertTrue(all(any(s in u for s in ("ipify", "ipinfo", "ip-api", "proxycheck")) for u in calls))
 
     def test_org_deduplicated_by_asn(self):
         info = [dict(provider="ipinfo.io", org="AS4808 China Unicom Beijing"), dict(provider="ip-api.com", org="AS4808 China Unicom")]
@@ -182,7 +188,7 @@ class IpTests(unittest.TestCase):
     def test_same_ipv4_ipv6_merged(self):
         same = [dict(provider="ip-api.com", country="US", city=None, timezone="America/Los_Angeles", org="AS399804 Hostodo", hosting=True, proxy=False, mobile=False)]
 
-        def fake_lookup(opener, ip):
+        def fake_lookup(opener, ip, token=None):
             return same
         with patch.object(check, "get_json", side_effect=lambda o, url, timeout=6: {"ip": "2001:db8::1" if "api6" in url else "203.0.113.9"}), \
              patch.object(check, "lookup_ip", side_effect=fake_lookup):
@@ -193,7 +199,7 @@ class IpTests(unittest.TestCase):
         self.assertIn("合并显示", rows[0]["evidence"])
 
     def test_different_ipv4_ipv6_kept_apart(self):
-        def fake_lookup(opener, ip):
+        def fake_lookup(opener, ip, token=None):
             c = "JP" if ":" in ip else "US"
             return [dict(provider="ip-api.com", country=c, timezone="UTC", org="AS1 X", hosting=False, proxy=False, mobile=False)]
         with patch.object(check, "get_json", side_effect=lambda o, url, timeout=6: {"ip": "2001:db8::1" if "api6" in url else "203.0.113.9"}), \
@@ -209,6 +215,10 @@ class IpTests(unittest.TestCase):
         self.assertLess(text.index("乙"), text.index("甲"))
         self.assertIn("结论：1 项需处理、1 项待确认。最需处理：丙。", text)
         self.assertIn("未发现需处理的问题", check.summary([check.finding("甲", "记录", "", "")]))
+
+    def test_tor_type_alone_is_confirmed(self):
+        c = check.classify([dict(provider="proxycheck.io", country="US", proxy=True, pc_type="TOR", risk=100)])
+        self.assertTrue(c["confirmed_proxy"])
 
     def test_linux_language_from_localectl(self):
         with patch.object(check, "command", return_value="   System Locale: LANG=zh_CN.UTF-8\n       VC Keymap: n/a"):
@@ -226,6 +236,68 @@ class IpTests(unittest.TestCase):
             self.assertNotIn(code, regions)
         for code in ("US", "JP", "SG", "TW", "GB"):
             self.assertIn(code, regions)
+
+
+class ScoreTests(unittest.TestCase):
+    def fact(self, **kw):
+        base = dict(route="直连", countries=["US"], region_bad=False, tz_match=True, confirmed_proxy=False, suspected_proxy=False,
+                    proxy_sources=[], residential=False, hosting=False, mobile=False, pc_type=None, risk=None, asn_type=None, known=True)
+        base.update(kw)
+        return base
+
+    def test_china_is_five(self):
+        s = check.score_env([self.fact(countries=["CN"], region_bad=True)], [])
+        self.assertEqual(s["score"], 5)
+        self.assertEqual(s["level"], "🔴 红")
+
+    def test_china_direct_with_us_proxy_is_five(self):
+        s = check.score_env([self.fact(countries=["CN"], region_bad=True), self.fact(route="终端代理", residential=True, risk=0)], [])
+        self.assertEqual(s["score"], 5)
+
+    def test_clean_us_residential_is_pure_green_99(self):
+        s = check.score_env([self.fact(residential=True, risk=0)], [])
+        self.assertEqual(s["score"], 99)
+        self.assertEqual(s["level"], "🟢 纯绿")
+        self.assertIn("封顶 99", s["items"])
+
+    def test_us_datacenter_not_proxy_is_above_85(self):
+        s = check.score_env([self.fact(hosting=True, tz_match=False)], [])
+        self.assertEqual(s["score"], 86)
+        self.assertEqual(s["level"], "🟩 偏绿")
+
+    def test_confirmed_proxy_capped_35(self):
+        s = check.score_env([self.fact(residential=True, risk=0, confirmed_proxy=True, proxy_sources=["a", "b"])], [])
+        self.assertLessEqual(s["score"], 35)
+
+    def test_suspected_proxy_loses_floor(self):
+        s = check.score_env([self.fact(hosting=True, tz_match=False, suspected_proxy=True, proxy_sources=["proxycheck.io"], risk=66)], [])
+        self.assertEqual(s["score"], 73)
+        self.assertEqual(s["level"], "🟡 黄")
+
+    def test_china_signals_cap_30_even_with_clean_us_ip(self):
+        signals = check.china_signals("Asia/Shanghai", ["zh_CN.UTF-8"])
+        self.assertEqual(len(signals), 2)
+        s = check.score_env([self.fact(residential=True, risk=0)], signals)
+        self.assertEqual(s["score"], 30)
+        self.assertEqual(check.china_signals("Asia/Taipei", ["zh_TW.UTF-8", "zh-Hant"]), [])
+
+    def test_other_supported_country_base_75(self):
+        s = check.score_env([self.fact(countries=["JP"], residential=True)], [])
+        self.assertEqual(s["score"], 75 + 5 + 3)
+
+    def test_proxy_route_is_scored_when_present(self):
+        s = check.score_env([self.fact(hosting=True), self.fact(route="终端代理", residential=True, risk=0)], [])
+        self.assertEqual(s["score"], 99)
+
+    def test_levels(self):
+        self.assertEqual([check.level(v) for v in (99, 80, 79, 60, 59, 30, 29)],
+                         ["🟢 纯绿", "🟩 偏绿", "🟡 黄", "🟡 黄", "🟠 橙", "🟠 橙", "🔴 红"])
+
+    def test_render_shows_score_first(self):
+        s = check.score_env([self.fact(residential=True, risk=0)], [])
+        text = check.render([check.finding("甲", "记录", "", "")], True, s)
+        self.assertLess(text.index("99 / 99"), text.index("结论"))
+        self.assertIn("非 Anthropic 官方", text)
 
 
 if __name__ == "__main__":
