@@ -117,8 +117,10 @@ class IpTests(unittest.TestCase):
         self.assertEqual(rows["出口 IP"]["state"], "需处理")
         self.assertIn("不在 Anthropic 支持地区名单", rows["出口 IP"]["evidence"])
         self.assertIn("换 IP 也不改变", rows["出口 IP"]["action"])
-        self.assertEqual(rows["IP 类型"]["state"], "记录")
+        self.assertNotIn("IP 类型", rows)  # 地区已需处理且未标记代理时不再多写一行
         self.assertEqual(rows["时区与 IP"]["state"], "记录")
+        self.assertIn("AS4134", rows["出口 IP"]["evidence"])
+        self.assertNotIn("AS4134/AS4134", rows["出口 IP"]["evidence"])
 
     def test_us_datacenter_with_timezone_mismatch(self):
         rows = self.detail([dict(provider="ip-api.com", country="US", timezone="America/Los_Angeles", org="AS399804", hosting=True, proxy=False, mobile=False)])
@@ -172,6 +174,41 @@ class IpTests(unittest.TestCase):
         self.assertTrue(any("终端代理" in r["name"] for r in proxied))
         self.assertNotIn("SECRET", json.dumps(proxied, ensure_ascii=False))
         self.assertTrue(all("ipify" in u or "ipinfo" in u or "ip-api" in u for u in calls))
+
+    def test_org_deduplicated_by_asn(self):
+        info = [dict(provider="ipinfo.io", org="AS4808 China Unicom Beijing"), dict(provider="ip-api.com", org="AS4808 China Unicom")]
+        self.assertEqual(check.org_text(info), "AS4808 China Unicom Beijing")
+
+    def test_same_ipv4_ipv6_merged(self):
+        same = [dict(provider="ip-api.com", country="US", city=None, timezone="America/Los_Angeles", org="AS399804 Hostodo", hosting=True, proxy=False, mobile=False)]
+
+        def fake_lookup(opener, ip):
+            return same
+        with patch.object(check, "get_json", side_effect=lambda o, url, timeout=6: {"ip": "2001:db8::1" if "api6" in url else "203.0.113.9"}), \
+             patch.object(check, "lookup_ip", side_effect=fake_lookup):
+            rows = check.ip_findings({})
+        names = [r["name"] for r in rows]
+        self.assertIn("出口 IP（直连）", names)
+        self.assertEqual(sum(n.startswith("出口 IP") for n in names), 1)
+        self.assertIn("合并显示", rows[0]["evidence"])
+
+    def test_different_ipv4_ipv6_kept_apart(self):
+        def fake_lookup(opener, ip):
+            c = "JP" if ":" in ip else "US"
+            return [dict(provider="ip-api.com", country=c, timezone="UTC", org="AS1 X", hosting=False, proxy=False, mobile=False)]
+        with patch.object(check, "get_json", side_effect=lambda o, url, timeout=6: {"ip": "2001:db8::1" if "api6" in url else "203.0.113.9"}), \
+             patch.object(check, "lookup_ip", side_effect=fake_lookup):
+            names = [r["name"] for r in check.ip_findings({})]
+        self.assertIn("出口 IP（直连 IPv4）", names)
+        self.assertIn("出口 IP（直连 IPv6）", names)
+
+    def test_most_severe_first_with_summary(self):
+        rows = [check.finding("甲", "记录", "", ""), check.finding("乙", "待确认", "", ""), check.finding("丙", "需处理", "", "")]
+        text = check.render(rows)
+        self.assertLess(text.index("丙"), text.index("乙"))
+        self.assertLess(text.index("乙"), text.index("甲"))
+        self.assertIn("结论：1 项需处理、1 项待确认。最需处理：丙。", text)
+        self.assertIn("未发现需处理的问题", check.summary([check.finding("甲", "记录", "", "")]))
 
     def test_linux_language_from_localectl(self):
         with patch.object(check, "command", return_value="   System Locale: LANG=zh_CN.UTF-8\n       VC Keymap: n/a"):

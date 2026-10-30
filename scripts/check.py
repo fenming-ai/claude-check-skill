@@ -296,6 +296,7 @@ def ip_findings(env, now=None):
     rows, seen = [], {}
     for route, handler in routes:
         opener = urllib.request.build_opener(handler)
+        found = []  # [(family, ip, info)]
         for family, url in IP_ECHO:
             if route != "直连" and family == "IPv6":
                 continue  # 代理只测一次 IPv4，避免重复请求
@@ -307,24 +308,53 @@ def ip_findings(env, now=None):
                     rows.append(finding("出口 IP（%s）" % route, "待确认", "未取得 %s 出口地址。" % family,
                                         "检查网络或代理；%s不可用时无法判断出口地区。" % ("代理" if route != "直连" else "")))
                 continue
-            label = "%s %s" % (route, family)
             if ip in seen:
-                rows.append(finding("出口 IP（%s）" % label, "记录", "%s，与%s相同。" % (mask_ip(ip), seen[ip]), "同一个出口，不重复查询。"))
+                rows.append(finding("出口 IP（%s %s）" % (route, family), "记录", "%s，与%s相同。" % (mask_ip(ip), seen[ip]), "同一个出口，不重复查询。"))
                 continue
-            seen[ip] = label
-            rows.extend(ip_detail(label, ip, lookup_ip(opener, ip), regions, effective, source, now))
+            seen[ip] = "%s %s" % (route, family)
+            found.append((family, ip, lookup_ip(opener, ip)))
+        # IPv4 与 IPv6 落在同一地区、同一运营方、同样标记时合并成一组，避免重复刷屏
+        if len(found) == 2 and signature(found[0][2]) == signature(found[1][2]):
+            rows.extend(ip_detail(route, [found[0][1], found[1][1]], found[0][2], regions, effective, source, now))
+        else:
+            for family, ip, info in found:
+                rows.extend(ip_detail("%s %s" % (route, family), ip, info, regions, effective, source, now))
     return rows
 
 
-def ip_detail(label, ip, info, regions, effective, source, now):
+def org_text(info):
+    """同一 AS 编号只保留最长的名称，避免“AS4808 China Unicom/AS4808 China Unicom Beijing”。"""
+    by = {}
+    for r in info:
+        org = r.get("org")
+        if not org:
+            continue
+        m = re.match(r"(AS\d+)\b", org)
+        key = m.group(1) if m else org
+        if key not in by or len(org) > len(by[key]):
+            by[key] = org
+    return "/".join(by.values())[:120]
+
+
+def signature(info):
+    return (tuple(sorted({r["country"] for r in info if r.get("country")})),
+            org_text(info).split(" ")[0],
+            tuple(sorted({r["timezone"] for r in info if r.get("timezone")})),
+            tuple((r.get("hosting"), r.get("proxy")) for r in info if r.get("hosting") is not None or r.get("proxy") is not None))
+
+
+def ip_detail(label, ips, info, regions, effective, source, now):
     rows = []
+    ips = [ips] if isinstance(ips, str) else ips
     name = "出口 IP（%s）" % label
     countries = sorted({r["country"] for r in info if r.get("country")})
-    orgs = sorted({r["org"] for r in info if r.get("org")})
     cities = sorted({r["city"] for r in info if r.get("city") and re.fullmatch(r"[^\n<>]{1,40}", r["city"])})
     shown = "%s；定位 %s%s；运营方 %s（来源 %s）" % (
-        mask_ip(ip), "/".join(countries) or "未取得", (" " + "/".join(cities)) if cities else "",
-        "/".join(orgs)[:120] or "未取得", "、".join(r["provider"] for r in info) or "无")
+        " 和 ".join(mask_ip(ip) for ip in ips), "/".join(countries) or "未取得", (" " + "/".join(cities)) if cities else "",
+        org_text(info) or "未取得", "、".join(r["provider"] for r in info) or "无")
+    if len(ips) > 1:
+        shown += "；IPv4 与 IPv6 结果相同，合并显示"
+    region_bad = False
     if not countries:
         rows.append(finding(name, "待确认", shown, "IP 查询服务未返回地区，稍后重试或换网络再查。"))
         return rows
@@ -332,6 +362,7 @@ def ip_detail(label, ip, info, regions, effective, source, now):
         rows.append(finding(name, "待确认", shown + "；支持地区名单缺失，无法对照。", "确认 scripts/supported_regions.json 存在。"))
     else:
         bad = [c for c in countries if c not in regions]
+        region_bad = bool(bad)
         if bad:
             rows.append(finding(name, "需处理", shown + "；%s 不在 Anthropic 支持地区名单（%s 生效版）。"
                                 "高风险：Anthropic 帮助中心把“在不受支持的地区创建账号”列为封号原因之一。" % ("/".join(bad), effective),
@@ -359,10 +390,10 @@ def ip_detail(label, ip, info, regions, effective, source, now):
             rows.append(finding("IP 类型（%s）" % label, "待确认", "被 %s 标记为：%s。" % (f["provider"], "、".join(kinds)),
                                 "Anthropic 没有公布 IP 类型与封号的关系；记录供排查，不代表一定会被封。"
                                 "共享 IP 过去被谁用过，本工具看不到。"))
-        else:
+        elif not region_bad:  # 地区已判为需处理时，“未标记”这一行只是噪音
             rows.append(finding("IP 类型（%s）" % label, "记录", "%s 未标记为机房或代理%s。" % (f["provider"], "（移动网络）" if f.get("mobile") else ""),
                                 "IP 库的判断可能滞后，不是 IP 质量担保。"))
-    else:
+    elif not region_bad:
         rows.append(finding("IP 类型（%s）" % label, "待确认", "未取得机房 / 代理标记。", "ip-api.com 未响应；稍后重试。"))
     local = int(now.utcoffset().total_seconds() // 60)
     zones = {r["timezone"]: tz_offset(r["timezone"], now) for r in info if r.get("timezone")}
@@ -381,10 +412,28 @@ def ip_detail(label, ip, info, regions, effective, source, now):
     return rows
 
 
+SEVERITY = {"需处理": 0, "待确认": 1, "记录": 2, "未检测": 3}
+
+
+def ordered(rows):
+    """按严重程度排序；同级保持检查顺序。"""
+    return sorted(rows, key=lambda r: SEVERITY.get(r["state"], 9))
+
+
+def summary(rows):
+    must = [r for r in rows if r["state"] == "需处理"]
+    check_ = [r for r in rows if r["state"] == "待确认"]
+    if must:
+        return "结论：%d 项需处理、%d 项待确认。最需处理：%s。" % (len(must), len(check_), "；".join(r["name"] for r in must[:3]))
+    return "结论：本次已检查项目未发现需处理的问题；%d 项待确认。" % len(check_)
+
+
 def render(rows, disclosed=False):
+    rows = ordered(rows)
     text = ["# Claude 环境体检", "检查结果只说明已观测的环境，不预测封号，也不保证账号稳定。"]
     if disclosed:
         text.append(IP_DISCLOSURE)
+    text.append("\n**" + summary(rows) + "**")
     for row in rows:
         text.append("\n- **%s｜%s**：%s\n  下一步：%s" % (row["state"], row["name"], row["evidence"], row["action"]))
     text.extend(["\n尚未验证：浏览器身份、账号与组织状态、受管配置、实际客户端代理链路、长期网络稳定性。", "\n" + PROMO])
@@ -411,7 +460,8 @@ def main():
     else:
         rows.extend(network_findings(args.samples))
     disclosed = not args.offline
-    print(json.dumps({"findings": rows, "disclosure": IP_DISCLOSURE if disclosed else None,
+    rows = ordered(rows)
+    print(json.dumps({"summary": summary(rows), "findings": rows, "disclosure": IP_DISCLOSURE if disclosed else None,
                       "limitations": "不预测封号；账号、浏览器、受管配置和实际代理链路仍需确认。", "promotion": PROMO},
                      ensure_ascii=False, indent=2) if args.json else render(rows, disclosed))
 
