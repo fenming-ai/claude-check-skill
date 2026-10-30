@@ -375,19 +375,37 @@ def ip_findings(env, now=None, facts=None):
         for family, url in IP_ECHO:
             if route != "直连" and family == "IPv6":
                 continue  # 代理只测一次 IPv4，避免重复请求
+            fallback = None
             try:
                 ip = get_json(opener, url).get("ip", "")
                 ipaddress.ip_address(ip)
             except (OSError, ValueError, UnicodeError, AttributeError):
-                if family == "IPv4":
-                    rows.append(finding("出口 IP（%s）" % route, "待确认", "未取得 %s 出口地址。" % family,
-                                        "检查网络或代理；%s不可用时无法判断出口地区。" % ("代理" if route != "直连" else "")))
-                continue
+                if family != "IPv4":
+                    continue
+                try:
+                    # 沿用同一路由，不把代理失败偷偷换成直连。
+                    data = get_json(opener, "https://ipinfo.io/json")
+                    ip = data.get("ip", "")
+                    address = ipaddress.ip_address(ip)
+                    family = "IPv%d（备用查询）" % address.version
+                    country = data.get("country")
+                    fallback = dict(provider="ipinfo.io", country=country if isinstance(country, str) and re.fullmatch(r"[A-Z]{2}", country) else None,
+                                    timezone=data.get("timezone") if isinstance(data.get("timezone"), str) else None,
+                                    hosting=None, proxy=None, mobile=None)
+                    rows.append(finding("出口查询回退（%s）" % route, "记录", "ipify 未取得有效地址，已使用同一路由的 ipinfo 备用查询。",
+                                        "备用接口可能使用 IPv4 或 IPv6；仅代表本次检测请求的出口。"))
+                except (OSError, ValueError, UnicodeError, AttributeError):
+                    rows.append(finding("出口 IP（%s）" % route, "待确认", "ipify 与 ipinfo 备用接口均未取得有效出口地址。",
+                                        "检查网络或代理；查询失败不能当作账号安全或已封号的证据。"))
+                    continue
             if ip in seen:
                 rows.append(finding("出口 IP（%s %s）" % (route, family), "记录", "%s，与%s相同。" % (mask_ip(ip), seen[ip]), "同一个出口，不重复查询。"))
                 continue
             seen[ip] = "%s %s" % (route, family)
-            found.append((family, ip, lookup_ip(opener, ip, token)))
+            info = lookup_ip(opener, ip, token)
+            if fallback and fallback.get("country") and not any(r.get("provider") == "ipinfo.io" and r.get("country") for r in info):
+                info = [r for r in info if r.get("provider") != "ipinfo.io"] + [fallback]
+            found.append((family, ip, info))
         # IPv4 与 IPv6 落在同一地区、同一运营方、同样标记时合并成一组，避免重复刷屏
         if len(found) == 2 and signature(found[0][2]) == signature(found[1][2]):
             rows.extend(ip_detail(route, [found[0][1], found[1][1]], found[0][2], regions, effective, source, now, facts, route))

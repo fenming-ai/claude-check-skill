@@ -107,6 +107,46 @@ class CheckTests(unittest.TestCase):
 class IpTests(unittest.TestCase):
     regions = {"US": "United States of America", "JP": "Japan"}
 
+    def test_ipify_failure_falls_back_and_scores_without_manual_lookup(self):
+        def fake(opener, url, timeout=6):
+            if url == "https://ipinfo.io/json":
+                return {"ip": "203.0.113.9", "country": "US", "timezone": "America/Los_Angeles"}
+            raise OSError("SECRET")
+        facts = []
+        with patch.object(check, "get_json", side_effect=fake):
+            rows = check.ip_findings({}, facts=facts)
+        score = check.score_env(facts, ["上海时区"])
+        self.assertEqual(score["score"], 30)
+        self.assertIn("橙", score["level"])
+        self.assertTrue(any("备用查询" in row["evidence"] for row in rows))
+        self.assertNotIn("203.0.113.9", json.dumps(rows))
+        self.assertNotIn("SECRET", json.dumps(rows))
+        self.assertIn("https://aiyopu.com/", check.render(rows, True, score))
+
+    def test_fallback_stays_on_proxy_and_handles_invalid_responses(self):
+        for invalid in (None, [], {}, {"ip": "not-an-ip"}):
+            proxy_handlers = []
+            def fake(opener, url, timeout=6):
+                if url == "https://ipinfo.io/json":
+                    proxy_handlers.append(next((h.proxies for h in opener.handlers if isinstance(h, check.urllib.request.ProxyHandler)), {}))
+                    return invalid
+                raise OSError("unavailable")
+            facts = []
+            with patch.object(check, "get_json", side_effect=fake):
+                rows = check.ip_findings({"HTTPS_PROXY": "http://127.0.0.1:9876"}, facts=facts)
+            self.assertEqual(proxy_handlers, [{}, {"https": "http://127.0.0.1:9876", "http": "http://127.0.0.1:9876"}])
+            self.assertIsNone(check.score_env(facts, [])["score"])
+            self.assertTrue(any("均未取得" in row["evidence"] for row in rows))
+
+    def test_fallback_ipv6_is_not_mislabeled_ipv4(self):
+        def fake(opener, url, timeout=6):
+            if url == "https://ipinfo.io/json":
+                return {"ip": "2001:db8::1", "country": "US"}
+            raise OSError("unavailable")
+        with patch.object(check, "get_json", side_effect=fake):
+            rows = check.ip_findings({})
+        self.assertTrue(any("IPv6（备用查询）" in row["name"] for row in rows))
+
     def detail(self, info, tz="UTC"):
         now = dt.datetime(2026, 10, 30, 12, 0, tzinfo=ZoneInfo(tz))
         return {r["name"].split("（")[0]: r for r in check.ip_detail("直连 IPv4", "203.0.113.9", info, self.regions, "2026-11-12", "https://example.test", now)}
