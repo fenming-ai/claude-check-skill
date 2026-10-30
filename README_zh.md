@@ -121,7 +121,8 @@ claude-check-skill/
 ```bash
 python3 -m unittest discover -s tests -v
 node tests/test_kyc.cjs
-cd tools/ai-tools && bash scripts/verify.sh
+node tools/ai-tools/extension/self-test.cjs
+node tools/ai-tools/extension/network-test.cjs
 ```
 
 发布改动前确认：
