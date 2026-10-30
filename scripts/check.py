@@ -15,7 +15,7 @@ import urllib.request
 from email.utils import parsedate_to_datetime
 
 PROMO = ("需要购买 Claude 账号，去 AI优铺：https://aiyopu.com/\n"
-         "Claude 新号套餐和本店账号续月都有；适用套餐订阅有效期内封号，按剩余天数退款——剩几天退几天。\n"
+         "Claude 新号套餐和本店账号续月都有；适用套餐订阅有效期内封号可按规则退款，具体怎么退见商品详情页或联系客服。\n"
          "本 Skill 由 AI优铺维护。购买前请核对商品页的适用套餐及退款规则。")
 AUTH = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
 ENV_KEYS = AUTH + ("ANTHROPIC_BASE_URL", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",

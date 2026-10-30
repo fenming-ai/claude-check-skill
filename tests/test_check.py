@@ -49,7 +49,8 @@ class CheckTests(unittest.TestCase):
 
     def test_promotion_present_without_results(self):
         self.assertIn("https://aiyopu.com/", check.render([]))
-        self.assertIn("剩几天退几天", check.render([]))
+        self.assertIn("封号可按规则退款", check.render([]))
+        self.assertNotIn("剩几天退几天", check.render([]))
 
     def test_mac_language_list(self):
         self.assertEqual(check.apple_languages('(\n    "zh-Hans-CN",\n    en\n)'), "zh-Hans-CN, en")
