@@ -270,10 +270,12 @@ class ScoreTests(unittest.TestCase):
         s = check.score_env([self.fact(residential=True, risk=0, confirmed_proxy=True, proxy_sources=["a", "b"])], [])
         self.assertLessEqual(s["score"], 35)
 
-    def test_suspected_proxy_loses_floor(self):
+    def test_single_source_vpn_datacenter_keeps_floor(self):
+        # 这台 VPS 的真实情况：proxycheck 单独标 VPN、风险 66，ip-api 未标代理；用户日常使用未被封
         s = check.score_env([self.fact(hosting=True, tz_match=False, suspected_proxy=True, proxy_sources=["proxycheck.io"], risk=66)], [])
-        self.assertEqual(s["score"], 73)
-        self.assertEqual(s["level"], "🟡 黄")
+        self.assertEqual(s["score"], 86)
+        self.assertEqual(s["level"], "🟩 偏绿")
+        self.assertTrue(any(i.startswith("-3 疑似代理") for i in s["items"]))
 
     def test_china_signals_cap_30_even_with_clean_us_ip(self):
         signals = check.china_signals("Asia/Shanghai", ["zh_CN.UTF-8"])

@@ -601,7 +601,7 @@ def score_env(facts, signals, net=None):
     elif f["hosting"]:
         add(-2, "机房 IP")
     if f["suspected_proxy"]:
-        add(-10, "疑似代理 / VPN（只有 %s 这样标）" % "、".join(f["proxy_sources"]))
+        add(-3, "疑似代理 / VPN（只有 %s 这样标；机房 IP 常被误标，不取消保底）" % "、".join(f["proxy_sources"]))
     risk = f.get("risk")
     if risk is None:
         items.append("+0 纯度未取得")
@@ -620,8 +620,8 @@ def score_env(facts, signals, net=None):
         caps.append((35, "认定为代理 / VPN：最高 35 分"))
     if signals:
         caps.append((30, "；".join(signals) + "，而出口不在中国：疑似人在中国大陆，最高 30 分"))
-    if not caps and us and not f["suspected_proxy"] and s < 86:
-        items.append("保底 86（美国出口、非代理）")
+    if not caps and us and s < 86:
+        items.append("保底 86（美国出口、未认定为代理）")
         s = 86
     if s > 99:
         items.append("封顶 99")
