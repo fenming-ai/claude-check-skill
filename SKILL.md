@@ -23,8 +23,9 @@ Python 需要 3.9 或更新版本。脚本只向 stdout 输出，不写报告文
 
 出口 IP 的结论按证据强度分开写：
 
-- **地区不在官方支持名单 → 需处理。** 名单来自 [Anthropic Supported Regions Policy](https://www.anthropic.com/legal/supported-regions)，随包存为 `scripts/supported_regions.json`（注明生效日期）。政策按**人实际所在地**判断：人在不受支持的地区，换成支持地区的 IP 也不合规。不得把“换 IP”写成解决办法；人在支持地区而 IP 显示在别处时，提示检查代理 / VPN。
-- **机房 IP、代理标记、IP 时区与系统时区不一致 → 待确认。** 这些是排查线索，Anthropic 没有公布它们与封号的关系。可以清楚指出不一致，但不得写成“一定会被封”“肯定是这个原因”。时区建议按实际所在地设置，不教用户伪造时区、语言或地区。
+- **地区不在官方支持名单（如中国大陆，含北京等城市）→ 需处理，高风险。** 名单来自 [Anthropic Supported Regions Policy](https://www.anthropic.com/legal/supported-regions)，随包存为 `scripts/supported_regions.json`（注明生效日期）；[Anthropic 帮助中心](https://support.claude.com/en/articles/8241253) 把“在不受支持的地区创建账号”列为封号原因之一。政策按**人实际所在地**判断：人在不受支持的地区，换成支持地区的 IP 也不合规。不得把“换 IP”写成解决办法；人在支持地区而 IP 显示在别处时，提示检查代理 / VPN。
+- **被标为代理 / VPN → 需处理，高风险（经验判断）。** 报告必须同时写明“Anthropic 没有公布这一条”。
+- **机房 IP、IP 时区与系统时区不一致 → 待确认。** 这些是排查线索，Anthropic 没有公布它们与封号的关系。可以清楚指出不一致，但不得写成“一定会被封”。时区建议按实际所在地设置，不教用户伪造时区、语言或地区。
 - 各 IP 库可能定位不同，出现分歧时如实列出。
 
 项目检查必须指向用户当前要排查的目录：

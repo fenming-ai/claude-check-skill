@@ -130,6 +130,21 @@ class IpTests(unittest.TestCase):
         self.assertEqual(rows["时区与 IP"]["state"], "待确认")
         self.assertIn("UTC−07:00", rows["时区与 IP"]["evidence"])
 
+    def test_beijing_ip_is_high_risk_with_official_source(self):
+        rows = self.detail([dict(provider="ipinfo.io", country="CN", city="Beijing", timezone="Asia/Shanghai", org="AS4808", hosting=None, proxy=None, mobile=None)],
+                           tz="Asia/Shanghai")
+        self.assertEqual(rows["出口 IP"]["state"], "需处理")
+        self.assertIn("CN Beijing", rows["出口 IP"]["evidence"])
+        self.assertIn("封号原因之一", rows["出口 IP"]["evidence"])
+        self.assertIn(check.BAN_REASONS_URL, rows["出口 IP"]["action"])
+
+    def test_proxy_flag_is_high_risk_but_labeled_unofficial(self):
+        rows = self.detail([dict(provider="ip-api.com", country="US", timezone="UTC", org="X", hosting=True, proxy=True, mobile=False)])
+        self.assertEqual(rows["IP 类型"]["state"], "需处理")
+        self.assertIn("代理 / VPN", rows["IP 类型"]["evidence"])
+        self.assertIn("经验判断", rows["IP 类型"]["evidence"])
+        self.assertIn("没有公布", rows["IP 类型"]["evidence"])
+
     def test_provider_disagreement_and_missing_data(self):
         rows = self.detail([dict(provider="ipinfo.io", country="US", timezone=None, org=None, hosting=None, proxy=None, mobile=None),
                             dict(provider="ip-api.com", country="JP", timezone=None, org=None, hosting=None, proxy=None, mobile=None)])

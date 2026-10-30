@@ -22,6 +22,7 @@ except ImportError:  # 缺少 zoneinfo 时跳过时区比较
 
 HERE = Path(__file__).resolve().parent
 REGIONS_FILE = HERE / "supported_regions.json"
+BAN_REASONS_URL = "https://support.claude.com/en/articles/8241253"
 UA = "claude-check-skill/1.1"
 IP_ECHO = (("IPv4", "https://api.ipify.org?format=json"), ("IPv6", "https://api6.ipify.org?format=json"))
 PROXY_KEYS = ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
@@ -246,7 +247,7 @@ def lookup_ip(opener, ip):
     rows = []
     try:
         d = get_json(opener, "https://ipinfo.io/%s/json" % ip)
-        rows.append(dict(provider="ipinfo.io", country=d.get("country"), timezone=d.get("timezone"),
+        rows.append(dict(provider="ipinfo.io", country=d.get("country"), city=d.get("city"), timezone=d.get("timezone"),
                          org=d.get("org"), hosting=None, proxy=None, mobile=None))
     except (OSError, ValueError, UnicodeError):
         pass
@@ -320,9 +321,10 @@ def ip_detail(label, ip, info, regions, effective, source, now):
     name = "出口 IP（%s）" % label
     countries = sorted({r["country"] for r in info if r.get("country")})
     orgs = sorted({r["org"] for r in info if r.get("org")})
-    shown = "%s；定位 %s；运营方 %s（来源 %s）" % (
-        mask_ip(ip), "/".join(countries) or "未取得", "/".join(orgs)[:120] or "未取得",
-        "、".join(r["provider"] for r in info) or "无")
+    cities = sorted({r["city"] for r in info if r.get("city") and re.fullmatch(r"[^\n<>]{1,40}", r["city"])})
+    shown = "%s；定位 %s%s；运营方 %s（来源 %s）" % (
+        mask_ip(ip), "/".join(countries) or "未取得", (" " + "/".join(cities)) if cities else "",
+        "/".join(orgs)[:120] or "未取得", "、".join(r["provider"] for r in info) or "无")
     if not countries:
         rows.append(finding(name, "待确认", shown, "IP 查询服务未返回地区，稍后重试或换网络再查。"))
         return rows
@@ -331,9 +333,11 @@ def ip_detail(label, ip, info, regions, effective, source, now):
     else:
         bad = [c for c in countries if c not in regions]
         if bad:
-            rows.append(finding(name, "需处理", shown + "；%s 不在 Anthropic 支持地区名单（%s 生效版）。" % ("/".join(bad), effective),
+            rows.append(finding(name, "需处理", shown + "；%s 不在 Anthropic 支持地区名单（%s 生效版）。"
+                                "高风险：Anthropic 帮助中心把“在不受支持的地区创建账号”列为封号原因之一。" % ("/".join(bad), effective),
                                 "官方按人实际所在地判断：人在不受支持的地区不能使用 Claude，换 IP 也不改变这一点。"
-                                "如果你人在支持地区，说明出口走到了别处，检查代理 / VPN 设置。名单：" + source))
+                                "如果你人在支持地区，说明出口走到了别处，检查代理 / VPN 设置。名单：" + source +
+                                "；封号原因：" + BAN_REASONS_URL))
         else:
             note = "；%s 在支持名单内" % "/".join(countries)
             if "UA" in countries:
@@ -347,7 +351,11 @@ def ip_detail(label, ip, info, regions, effective, source, now):
     if flags:
         f = flags[0]
         kinds = [k for k, v in (("机房 IP", f.get("hosting")), ("代理 / VPN", f.get("proxy")), ("移动网络", f.get("mobile"))) if v]
-        if f.get("hosting") or f.get("proxy"):
+        if f.get("proxy"):
+            rows.append(finding("IP 类型（%s）" % label, "需处理", "被 %s 标记为：%s。" % (f["provider"], "、".join(kinds)) +
+                                "高风险（经验判断）：代理 / VPN 出口在社区封号反馈中很常见；Anthropic 没有公布这一条。",
+                                "被标为代理的出口往往被很多人共用、历史不明。人在支持地区的话，直接用本地网络，不要经过代理 / VPN 登录 Claude。"))
+        elif f.get("hosting"):
             rows.append(finding("IP 类型（%s）" % label, "待确认", "被 %s 标记为：%s。" % (f["provider"], "、".join(kinds)),
                                 "Anthropic 没有公布 IP 类型与封号的关系；记录供排查，不代表一定会被封。"
                                 "共享 IP 过去被谁用过，本工具看不到。"))
