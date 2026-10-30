@@ -57,6 +57,8 @@ claude.ai 探测不带账号凭证，不跟随重定向，不走代理；返回 
 
 机制来源和错误处理见 [报错与证据](references/diagnosis.md)。
 
+常见封号原因与合规建议见 [references/ban-reasons.md](references/ban-reasons.md)：每条标明依据是官方原文还是经验判断，只讲按规则使用，不教隐藏位置或绕过检测。
+
 ## 使用修复模式
 
 可以对助手说：
