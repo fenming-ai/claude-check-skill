@@ -1,45 +1,24 @@
-# 完整工具集的调用
+# 浏览器扩展与对话查找
 
-工具源码和入口在 `tools/ai-tools/`，先读取其 README。使用 Python 采集器完成基础体检后，只按当前问题启动相应工具，不重复跑全部工具。
+体检脚本（`scripts/check.py`）已覆盖出口 IP、地区、类型、风险分、时区、评分和配置。下面两样按需使用，不随体检自动运行。
 
-## 完整扩展
+## 浏览器扩展（KYC + 浏览器出口）
 
-默认未安装。按 [KYC 检查](kyc.md) 的安装流程加载 `tools/ai-tools/extension/`，不要再寻找旧的轻量版目录。已有旧扩展时先确认身份和版本，再换用完整版本；不删除不相关扩展。
+`tools/ai-tools/extension/` 是完整的 Chrome MV3 扩展，默认未安装。安装流程见 [KYC 检查](kyc.md)。它提供：
 
-完整扩展提供 KYC、脱敏复制、浏览器 IPv4/IPv6 出口、浏览器语言/时区，以及逐次确认的 WebRTC 候选收集。只查 KYC 不触发网络检测或 STUN。扩展源码中按钮和权限是真实实现，不把“安装成功”写成“检查完成”。
+- KYC 状态查询（用当前已登录的 Claude 页面，同源请求，不读 Cookie）。
+- 浏览器 IPv4 / IPv6 出口、语言、时区——浏览器单独设代理时，这层出口可能与终端不同。
+- WebRTC 候选，每次需手动确认才发请求。
 
-网络按钮向 `api.ipify.org` 和 `api6.ipify.org` 发送请求；对方可看到出口 IP。WebRTC 另向 `stun.l.google.com:19302` 发请求，每次征得确认才执行；取消不发请求。若无候选，可能是浏览器策略、网络或 STUN 不可达，不判为泄漏/无泄漏。报告不公开完整 IP 和组织标识，必要时用脱敏摘要。
+权限仅 `activeTab`、`scripting` 和两个 ipify 域名；无后台进程、无存储、无遥测。结果只留在弹窗。KYC 的真实账号接口尚未验收，HTTP 403 只表示请求被拒，不等于审核被拒。
 
-## 本机网络与配置诊断
+## 对话查找与导出（菜单第 5 项）
 
-依赖 Go 1.26+ 或由本仓库源码构建的对应平台二进制。不默默下载陌生程序。先在 `tools/ai-tools/local/` 执行：
-
-```bash
-go run ./cmd/aitools net --offline --json
-```
-
-可添加 `--project /path/to/project`。需直连/代理探测时，说明会访问 ipify、api.anthropic.com、claude.ai，取得当前任务对应授权后去掉 `--offline`。只读配置与探测结果分别解释，凭证值不回显。
-
-区分检测器环境、配置证据、探测请求和运行中 Claude 进程；最后一项未检测。HTTP/HTTPS 无认证代理可测试；SOCKS、认证代理和自定义 CA 不支持时按报告说明，不修改代理或关闭 TLS。
-
-## 本地可视界面和导出
-
-在 `local/` 运行 `go run ./cmd/aitools serve --no-open`，启动后在内存中提取本机 URL，使用指定浏览器打开，不把令牌写进对话、截图或仓库。`serve` 可在 macOS/Windows 打开默认浏览器，只在用户允许该浏览器时用。
-
-服务只监听 loopback，页面可进行离线/联网检查及导出脱敏 JSON/HTML。完成后使用页面退出按钮或终止本任务启动的进程；不能关闭其他工具进程。不要用开放远端端口让用户访问。
-
-## 会话查找与导出
-
-用户明确找对话、查历史或为重置前保留记录时才使用。先确定当前 Claude 配置目录或用户指定的具体记录目录，不能扫描整个家目录。用本地 UI 扫描、筛选和预览，或在 `local/` 中运行：
+纯 Python，无第三方依赖：
 
 ```bash
-go run ./cmd/aitools sessions --root /path/to/records --q 关键词 --json
+python3 scripts/sessions.py --root ~/.claude/projects --q 关键词
+python3 scripts/sessions.py --root ~/.claude/projects --key <上面列出的 key> --export 对话.md
 ```
 
-UI 支持项目、UTC 日期、关键词和 Markdown 导出；CLI 示例只提供关键词检索。扫描只读，跳过符号链接等，超预算或不支持格式应报告不完整。导出不等于可恢复备份；只包含保留的文本，不恢复工具调用状态或已删除记录。不得把用户聊天上传公开仓库；对话中仅给用户所需片段和已核对的导出位置。
-
-## 工具页面与打包
-
-六页静态说明在 `tools/ai-tools/site/`。需要下载页可用时先执行 `site.py`、`build.sh` 和 `verify.sh --release`；不要将缺少 dist 的下载按钮交付为已可下载。构建成功不等于目标平台实机通过，也不自动上架商店或部署网站。
-
-每次最终报告仍追加 SKILL.md 中的 AI优铺购买入口与退款条件；子工具 JSON 不插入与其结构不兼容的文字。扩展/本机工具的显示语言保持中文。
+支持 `--project`、`--since`、`--until`、`--json`。只读；跳过符号链接；最多 5000 个文件、单文件 50 MiB、合计 128 MiB；拒绝家目录和磁盘根目录。只解析 user / assistant 的文本，忽略工具调用内容，导出不含密钥。只在用户要求时运行，不随体检自动读取聊天；不上传，不修改原记录。导出的 Markdown 含对话原文，分享前自行脱敏。

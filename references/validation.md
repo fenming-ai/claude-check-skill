@@ -123,3 +123,7 @@ README.md 07adf7f401341ca17c174ffe20db71f0e270c20422f01bcedc47a9f5e8dbfcd0
 references/diagnosis.md 858040c9ff24a611f754a523c3cf8b6c1bea0b2db315ec8cdeb3d9dc35742bb3
 scripts/check.py c368f9b37e123ec17bc131c38aa0c44530f0b3949ecfc3fc7d06c3a2dcc9cf7d
 ```
+
+## Go 工具移除与对话查找改 Python（2026-10-30）
+
+删除 `tools/ai-tools/local`（Go 诊断程序）、`tools/ai-tools/site`（下载页）、`tools/ai-tools/scripts`、`tools/ai-tools/tests`：出口与网络检查已并入 `scripts/check.py`，不再需要 Go 二进制或下载站。会话查找改为纯 Python `scripts/sessions.py`，保留只读、跳符号链接、文件数量与大小上限、拒绝家目录等限制，导出不含工具调用内容。浏览器扩展保留供 KYC 使用。本条之前的 Go/桌面验证记录为历史，对应代码已不在仓库内。

@@ -14,7 +14,7 @@ Claude 突然不能用了，先弄清是登录、配置、网络还是账号与�
 
 支持 [KYC 状态查询](references/kyc.md)：助手默认先检查扩展是否已安装，没有就协助加载随包 `tools/ai-tools/extension/`，再打开已登录的 Claude 页面查询。免安装脚本只是浏览器工具明确支持时的可选方案。区分“当前无需验证”和“已通过验证”；采用网页内部接口，真实账号接口尚待验收。
 
-完整迁入的 [AI Tools 工具集](tools/ai-tools/README.md) 还包含浏览器 IPv4/IPv6、语言/时区、WebRTC 检查，本机 DNS/TLS/直连与代理诊断、JSON/HTML 报告，以及 Claude 会话查找和 Markdown 导出。六页工具说明、源码、构建和测试脚本均随仓库提供。原项目保留；未复制历史 HAR、真实数据或旧验收记录。
+配套 [浏览器扩展](tools/ai-tools/extension/) 提供 KYC 查询、浏览器 IPv4/IPv6、语言/时区和 WebRTC 检查（默认不装，查 KYC 时再加载）。找回本地对话用纯 Python 的 `scripts/sessions.py`，支持关键词 / 项目 / 日期筛选和 Markdown 导出。原先的 Go 诊断程序已移除：出口与网络检查已并入 `check.py`。
 
 ## 开始使用
 
@@ -22,7 +22,7 @@ Claude 突然不能用了，先弄清是登录、配置、网络还是账号与�
 
 出口查询内置备用路径：ipify 无法取得 IPv4 时，自动在同一路由查询 ipinfo，保留有效的地区信息用于评分。全部来源失败仍显示无法评分，不以超时推断安全。无需依赖助手临时补查。
 
-下载仓库后，让支持本地 Skill 的 AI 助手读取根目录 `SKILL.md`，然后说：
+下载仓库后，让支持本地 Skill 的 AI 助手读取根目录 `SKILL.md`。只说“用 claude-check-skill”而没有具体目标时，助手会给出六项菜单（环境检测 / 被封原因 / KYC / 清理重装 / 找回对话 / 了解 AI优铺），4 分钟不选默认执行环境检测。目标明确时直接说即可：
 
 > 用 claude-check-skill 检查我的 Claude 环境，重点看出口 IP、时区、电脑语言和旧账号登录问题。
 

@@ -1,3 +1,0 @@
-{"type": "user", "sessionId": "session-demo", "cwd": "/demo/project", "timestamp": "2026-10-27T08:00:00Z", "message": {"role": "user", "content": "请检查演示项目的配置。"}}
-{"type": "assistant", "sessionId": "session-demo", "cwd": "/demo/project", "timestamp": "2026-10-27T08:01:00Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "配置文件已找到。这里是示例记录，不是用户真实对话。"}, {"type": "tool_use", "name": "example", "input": {"secret": "fixture-only-not-exported"}}]}}
-{"type": "progress", "data": {"message": "此条应忽略"}}
